@@ -195,9 +195,9 @@ export default function BookPage() {
           embedded
           title={selectedBook ? `书籍问答：${selectedBook.bookName}` : "书籍问答"}
           subtitle={selectedBook ? `当前书籍：${selectedBook.bookNamePinyin}` : "请先在左侧选择一本书"}
-          streamPath="/book/read/stream"
+          streamPath="/book/read"
           memoryScope={selectedBookId ? `book-${selectedBookId}` : "book-default"}
-          hintText="文本直问：/book/read/stream；语音链路：/speech/asr -> /book/read/stream；语音合成：/speech/tts/ws"
+          hintText="文本直问：/book/read（Data Stream Protocol）；语音链路：/speech/asr + /speech/tts/ws"
           getExtraStreamParams={() => ({ bookId: selectedBookId })}
           validateBeforeAsk={() => (selectedBookId ? null : "请先选择左侧书籍")}
         />

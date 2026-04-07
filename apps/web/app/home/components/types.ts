@@ -1,8 +1,3 @@
-﻿export type MessageRole = "user" | "assistant";
+import type { UIMessage } from "ai";
 
-export type ChatMessage = {
-  id: string;
-  role: MessageRole;
-  content: string;
-  meta: string;
-};
+export type ChatMessage = UIMessage;

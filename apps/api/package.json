@@ -10,10 +10,12 @@
     "lint": "echo 'No lint configured for api'"
   },
   "dependencies": {
+    "@ai-sdk/langchain": "^2.0.152",
     "@langchain/community": "^1.1.24",
     "@langchain/core": "^1.1.38",
     "@langchain/openai": "^1.4.1",
     "@langchain/textsplitters": "^1.0.1",
+    "@nestjs-modules/mailer": "^2.3.4",
     "@nestjs/common": "^11.0.0",
     "@nestjs/config": "^4.0.3",
     "@nestjs/core": "^11.0.0",
@@ -22,16 +24,19 @@
     "@nestjs/serve-static": "^5.0.4",
     "@nestjs/typeorm": "^11.0.0",
     "@zilliz/milvus2-sdk-node": "^2.6.12",
+    "ai": "^6.0.146",
     "dotenv": "^17.3.1",
     "epub2": "^3.0.2",
     "html-to-text": "^9.0.5",
+    "langchain": "^1.3.0",
     "mysql2": "^3.20.0",
     "pinyin-pro": "^3.28.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "tencentcloud-sdk-nodejs": "^4.1.205",
     "typeorm": "^0.3.28",
-    "ws": "^8.20.0"
+    "ws": "^8.20.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.0",

@@ -1,15 +1,13 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
 import { ChatHeader } from "./ChatHeader";
 import { Composer } from "./Composer";
 import { MessageList } from "./MessageList";
 import styles from "../home.module.css";
 import type { ChatMessage } from "./types";
-
-const MEMORY_WINDOW_SIZE = 10;
-const MEMORY_ITEM_MAX_CHARS = 300;
-const MEMORY_TOTAL_MAX_CHARS = 2000;
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001").replace(
   /\/$/,
@@ -17,21 +15,15 @@ const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:
 );
 const API_WS_BASE_URL = (
   process.env.NEXT_PUBLIC_API_WS_BASE_URL ?? API_BASE_URL.replace(/^http/i, "ws")
-).replace(/\/$/, ""); 
-
-function nowTime() {
-  return new Date().toLocaleTimeString("zh-CN", { hour12: false });
-}
+).replace(/\/$/, "");
 
 function uid() {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-type StoredMessage = Pick<ChatMessage, "role" | "content" | "meta">;
-
 type StoredMemoryPayload = {
   sessionId: string;
-  messages: StoredMessage[];
+  messages: ChatMessage[];
 };
 
 type ChatPageProps = {
@@ -49,13 +41,12 @@ export function ChatPage({
   embedded = false,
   title,
   subtitle,
-  streamPath = "/ai/chat/stream",
+  streamPath = "/ai/chat",
   memoryScope = "home",
   hintText,
   getExtraStreamParams,
   validateBeforeAsk,
 }: ChatPageProps = {}) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState("");
   const [statusText, setStatusText] = useState("未开始");
   const [isTyping, setIsTyping] = useState(false);
@@ -69,8 +60,6 @@ export function ChatPage({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingStreamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-
-  const activeStreamRef = useRef<EventSource | null>(null);
 
   const ttsWsRef = useRef<WebSocket | null>(null);
   const ttsSessionIdRef = useRef<string | null>(null);
@@ -91,20 +80,25 @@ export function ChatPage({
     [],
   );
 
-  useEffect(() => {
-    const el = document.getElementById("messages");
-    if (el) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [messages]);
+  const transport = useMemo(
+    () =>
+      new DefaultChatTransport<ChatMessage>({
+        api: `${API_BASE_URL}${streamPath}`,
+        prepareSendMessagesRequest: ({ messages }) => ({
+          body: {
+            messages,
+            sessionId: memorySessionIdRef.current,
+            ttsSessionId: speechEnabled ? ttsSessionIdRef.current ?? undefined : undefined,
+            ...(getExtraStreamParams?.() ?? {}),
+          },
+        }),
+      }),
+    [getExtraStreamParams, speechEnabled, streamPath],
+  );
 
-  useEffect(() => {
-    return () => {
-      closeActiveStream();
-      closeTtsWs();
-      stopRecordingTracks();
-    };
-  }, []);
+  const { messages, setMessages, sendMessage, stop, status: chatStatus, error } = useChat<ChatMessage>({
+    transport,
+  });
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -113,97 +107,63 @@ export function ChatPage({
     const raw = window.localStorage.getItem(storageKey);
     if (!raw) {
       memorySessionIdRef.current = uid();
-      setMessages([]);
       return;
     }
 
     try {
       const parsed = JSON.parse(raw) as StoredMemoryPayload;
       memorySessionIdRef.current = parsed.sessionId?.trim() || uid();
-      const restored = (parsed.messages ?? []).map((item) => ({
-        id: uid(),
-        role: item.role,
-        content: item.content,
-        meta: item.meta,
-      }));
-      setMessages(restored);
+      setMessages(Array.isArray(parsed.messages) ? parsed.messages : []);
     } catch {
       memorySessionIdRef.current = uid();
-      setMessages([]);
     }
-  }, [memoryScope]);
+  }, [memoryScope, setMessages]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     const storageKey = `chat-memory:${memoryScope}`;
     const payload: StoredMemoryPayload = {
       sessionId: memorySessionIdRef.current,
-      messages: messages.map((item) => ({
-        role: item.role,
-        content: item.content,
-        meta: item.meta,
-      })),
+      messages,
     };
     window.localStorage.setItem(storageKey, JSON.stringify(payload));
   }, [messages, memoryScope]);
 
-  function appendMessage(role: "user" | "assistant", content: string, meta: string) {
-    const message: ChatMessage = {
-      id: uid(),
-      role,
-      content,
-      meta,
-    };
-    setMessages((prev) => [...prev, message]);
-    return message.id;
-  }
-
-  function updateMessage(id: string, updates: Partial<ChatMessage>) {
-    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...updates } : m)));
-  }
-
-  function buildPromptWithRecentWindow(query: string) {
-    const recent = messages.slice(-MEMORY_WINDOW_SIZE);
-    if (recent.length === 0) {
-      return query;
+  useEffect(() => {
+    const el = document.getElementById("messages");
+    if (el) {
+      el.scrollTop = el.scrollHeight;
     }
+  }, [messages]);
 
-    const lines: string[] = [];
-    let totalChars = 0;
-
-    for (let i = recent.length - 1; i >= 0; i -= 1) {
-      const item = recent[i];
-      const content = item.content.replace(/\s+/g, " ").trim();
-      if (!content) continue;
-      const clipped = content.slice(0, MEMORY_ITEM_MAX_CHARS);
-      const line = `${item.role === "user" ? "用户" : "助手"}: ${clipped}`;
-      if (totalChars + line.length > MEMORY_TOTAL_MAX_CHARS) {
-        break;
+  useEffect(() => {
+    if (chatStatus === "streaming") {
+      status.set("AI 正在流式回答...", true);
+      return;
+    }
+    if (chatStatus === "submitted") {
+      status.set("请求已发送，等待响应...", true);
+      return;
+    }
+    if (chatStatus === "error") {
+      status.set(`处理失败：${error?.message ?? "未知错误"}`);
+      return;
+    }
+    if (chatStatus === "ready" && !isRecording) {
+      setIsTyping(false);
+      if (!statusText.startsWith("语音")) {
+        setStatusText("就绪");
       }
-      lines.push(line);
-      totalChars += line.length;
     }
+  }, [chatStatus, error, isRecording, status, statusText]);
 
-    if (lines.length === 0) {
-      return query;
-    }
-
-    const orderedLines = lines.reverse().join("\n");
-    return [
-      "请基于以下最近对话继续回答：",
-      orderedLines,
-      "",
-      `当前问题：${query}`,
-      "请直接回答当前问题。",
-    ].join("\n");
-  }
-
-  function closeActiveStream() {
-    if (activeStreamRef.current) {
-      activeStreamRef.current.close();
-      activeStreamRef.current = null;
-    }
-  }
+  useEffect(() => {
+    return () => {
+      void stop();
+      closeTtsWs();
+      stopRecordingTracks();
+    };
+  }, [stop]);
 
   function stopRecordingTracks() {
     if (recordingStreamRef.current) {
@@ -253,12 +213,9 @@ export function ChatPage({
       if (next) {
         sourceBuffer.appendBuffer(next);
         if (audioEl && !ttsUserPausedRef.current) {
-          audioEl
-            .play()
-            .then(() => {})
-            .catch(() => {
-              // Browser autoplay policy may block playback.
-            });
+          void audioEl.play().catch(() => {
+            // Browser autoplay policy may block playback.
+          });
         }
       }
       return;
@@ -383,46 +340,7 @@ export function ChatPage({
     });
   }
 
-  async function streamAiReply(query: string) {
-    closeActiveStream();
-
-    const assistantMessageId = appendMessage("assistant", "", "AI 正在回答...");
-    const params = new URLSearchParams();
-    params.set("query", query);
-    params.set("sessionId", memorySessionIdRef.current);
-    if (ttsSessionIdRef.current) {
-      params.set("ttsSessionId", ttsSessionIdRef.current);
-    }
-    const extraParams = getExtraStreamParams?.() ?? {};
-    for (const [key, value] of Object.entries(extraParams)) {
-      if (value) {
-        params.set(key, value);
-      }
-    }
-    const url = `${API_BASE_URL}${streamPath}?${params.toString()}`;
-
-    await new Promise<string>((resolve) => {
-      const es = new EventSource(url);
-      activeStreamRef.current = es;
-      let aiResult = "";
-
-      es.onmessage = (event) => {
-        aiResult += event.data || "";
-        updateMessage(assistantMessageId, { content: aiResult || "(空结果)" });
-      };
-
-      es.onerror = () => {
-        es.close();
-        if (activeStreamRef.current === es) {
-          activeStreamRef.current = null;
-        }
-        updateMessage(assistantMessageId, { meta: `AI 回复完成 ${nowTime()}` });
-        resolve(aiResult);
-      };
-    });
-  }
-
-  async function askWithQuery(query: string, source: string) {
+  async function askWithQuery(query: string) {
     const validationMessage = validateBeforeAsk?.();
     if (validationMessage) {
       status.set(validationMessage);
@@ -435,31 +353,29 @@ export function ChatPage({
       return;
     }
 
-    appendMessage("user", trimmed, `${source} ${nowTime()}`);
     setPrompt("");
     setSendDisabled(true);
     status.set("AI 正在流式回答...", true);
 
     try {
-      const queryWithMemory = buildPromptWithRecentWindow(trimmed);
       if (speechEnabled) {
         await ensureTtsConnection();
       } else {
         closeTtsWs();
       }
-      await streamAiReply(queryWithMemory);
+
+      await sendMessage({ text: trimmed });
       status.set("对话完成");
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      appendMessage("assistant", `处理失败：${detail}`, `异常 ${nowTime()}`);
-      status.set("处理失败");
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      status.set(`处理失败：${detail}`);
     } finally {
       setSendDisabled(false);
     }
   }
 
   async function handleSend() {
-    await askWithQuery(prompt, "文字提问");
+    await askWithQuery(prompt);
   }
 
   async function handleRecordToggle() {
@@ -475,7 +391,7 @@ export function ChatPage({
     }
 
     try {
-      closeActiveStream();
+      await stop();
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       recordingStreamRef.current = stream;
@@ -513,11 +429,10 @@ export function ChatPage({
             return;
           }
 
-          await askWithQuery(recognized, "语音提问");
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          appendMessage("assistant", `语音处理失败：${detail}`, `异常 ${nowTime()}`);
-          status.set("语音处理失败");
+          await askWithQuery(recognized);
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e);
+          status.set(`语音处理失败：${detail}`);
         } finally {
           stopRecordingTracks();
           setIsRecording(false);
@@ -527,10 +442,9 @@ export function ChatPage({
       recorder.start(250);
       setIsRecording(true);
       status.set("录音中，点击“停止录音”完成提问");
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      appendMessage("assistant", `无法开始录音：${detail}`, `异常 ${nowTime()}`);
-      status.set("无法开始录音");
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      status.set(`无法开始录音：${detail}`);
       setIsRecording(false);
       stopRecordingTracks();
     }
@@ -570,20 +484,23 @@ export function ChatPage({
         title={title}
         subtitle={subtitle}
       />
-      <MessageList messages={messages} />
+      <MessageList messages={messages} isStreaming={chatStatus === "streaming"} />
       <Composer
         prompt={prompt}
         onPromptChange={setPrompt}
         onSubmit={handleSend}
         onRecordToggle={handleRecordToggle}
         onSpeechToggle={handleSpeechToggle}
-        sendDisabled={sendDisabled}
+        sendDisabled={sendDisabled || chatStatus === "submitted" || chatStatus === "streaming"}
         isRecording={isRecording}
         speechEnabled={speechEnabled}
         audioRef={audioRef}
         onAudioPause={handleAudioPause}
         onAudioPlay={handleAudioPlay}
-        hintText={hintText}
+        hintText={
+          hintText ??
+          "文本问答：useChat -> /ai/chat（Data Stream Protocol）；语音链路：/speech/asr + /speech/tts/ws"
+        }
       />
     </section>
   );
@@ -592,9 +509,5 @@ export function ChatPage({
     return chatShell;
   }
 
-  return (
-    <main className={styles.page}>
-      {chatShell}
-    </main>
-  );
+  return <main className={styles.page}>{chatShell}</main>;
 }

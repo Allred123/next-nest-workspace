@@ -65,7 +65,7 @@ export class BookService {
   private readonly milvusClient: MilvusClient;
 
   constructor(
-    @Inject("BOOK_CHAT_MODEL") private readonly chatModel: ChatOpenAI,
+    @Inject("CHAT_MODEL") private readonly chatModel: ChatOpenAI,
     @Inject("BOOK_EMBEDDINGS_MODEL")
     private readonly embeddings: OpenAIEmbeddings,
     @InjectRepository(Book) private readonly bookRepo: Repository<Book>,
