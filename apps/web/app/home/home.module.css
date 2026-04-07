@@ -72,7 +72,6 @@
   max-width: min(680px, 84%);
   border-radius: 16px;
   padding: 12px 14px;
-  white-space: pre-wrap;
   line-height: 1.55;
   font-size: 14px;
   border: 1px solid #e5e7eb;
@@ -81,10 +80,12 @@
 .user .bubble {
   background: #e8f1ff;
   border-color: #cfe2ff;
+  white-space: pre-wrap;
 }
 
 .assistant .bubble {
   background: #f8fafc;
+  white-space: normal;
 }
 
 .meta {

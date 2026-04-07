@@ -1,4 +1,7 @@
 import "./globals.css";
+import "streamdown/styles.css";
+import "./components/StreamdownText.css";
+import "./components/ToolPanels.css";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 

@@ -1,3 +1,5 @@
+'use client'
+
 import {
   getToolName,
   isToolUIPart,
@@ -6,7 +8,6 @@ import {
   type UIMessage,
 } from 'ai'
 import { StreamdownText } from './StreamdownText'
-import './ToolPanels.css'
 
 type AnyToolPart = ToolUIPart | DynamicToolUIPart
 

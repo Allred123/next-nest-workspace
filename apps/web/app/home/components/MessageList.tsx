@@ -1,4 +1,4 @@
-import styles from "../home.module.css";
+﻿import styles from "../home.module.css";
 import type { ChatMessage } from "./types";
 import { MessagePart } from "../../components/ToolPanels";
 
@@ -28,6 +28,8 @@ function findLastTextPartIndex(message: ChatMessage): number {
 export function MessageList({ messages, isStreaming }: MessageListProps) {
   const lastAssistantId = findLastAssistantId(messages);
 
+  console.log("messages", messages);
+
   return (
     <section className={styles.messages} id="messages">
       {messages.length === 0 ? (
@@ -35,10 +37,13 @@ export function MessageList({ messages, isStreaming }: MessageListProps) {
       ) : null}
 
       {messages.map((message) => {
-        const roleClass = message.role === "user" ? styles.user : styles.assistant;
+        const roleClass =
+          message.role === "user" ? styles.user : styles.assistant;
         const lastTextPartIndex = findLastTextPartIndex(message);
         const isLastAssistantMessage =
-          isStreaming && message.role === "assistant" && message.id === lastAssistantId;
+          isStreaming &&
+          message.role === "assistant" &&
+          message.id === lastAssistantId;
 
         return (
           <div key={message.id} className={`${styles.msgRow} ${roleClass}`}>

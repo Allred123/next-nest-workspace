@@ -1,16 +1,54 @@
-:root {
-  color-scheme: light;
-}
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-* {
-  box-sizing: border-box;
-}
+@layer base {
+  :root {
+    color-scheme: light;
 
-html,
-body {
-  margin: 0;
-  padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --border: oklch(0.922 0 0);
+    --input: oklch(0.922 0 0);
+    --primary: oklch(0.205 0 0);
+    --primary-foreground: oklch(0.985 0 0);
+    --radius: 0.625rem;
+
+    /* Streamdown + ToolPanels theme tokens */
+    --bg: #ffffff;
+    --social-bg: #f8fafc;
+    --text: #475569;
+    --text-h: #0f172a;
+    --accent: #4f46e5;
+    --code-bg: #eef2ff;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+      "Courier New", monospace;
+    --tool-panel-bg: #f3f0ff;
+    --tool-panel-bg-2: #ede9fe;
+    --tool-mail-accent: #0f766e;
+    --tool-mail-bg: #ecfeff;
+    --tool-mail-bg-2: #d1fae5;
+    --sidebar: #f8fafc;
+    --sidebar-foreground: #0f172a;
+  }
+
+  * {
+    box-sizing: border-box;
+    border-color: var(--border);
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
 }
 
 pre {
