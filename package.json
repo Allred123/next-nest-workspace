@@ -1,0 +1,12 @@
+{
+  "name": "next-nest-workspace",
+  "private": true,
+  "version": "0.0.1",
+  "packageManager": "pnpm@10.32.1",
+  "scripts": {
+    "dev": "pnpm -r --parallel --if-present dev",
+    "build": "pnpm -r --if-present build",
+    "start": "pnpm -r --if-present start",
+    "lint": "pnpm -r --if-present lint"
+  }
+}

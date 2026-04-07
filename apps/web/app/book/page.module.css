@@ -1,0 +1,191 @@
+﻿.page {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 14px;
+  max-width: 1400px;
+  margin: 20px auto;
+  padding: 0 14px;
+}
+
+.sidebar {
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 12px;
+  min-height: 74vh;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebarHeader {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.tip {
+  color: #6b7280;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.error {
+  color: #c0392b;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.bookList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+}
+
+.bookItem {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  text-align: left;
+  background: #ffffff;
+  padding: 10px;
+  cursor: pointer;
+}
+
+.bookItemActive {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+
+.bookTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2329;
+}
+
+.bookMeta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.chatArea {
+  min-width: 0;
+}
+
+.sidebarFooter {
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.uploadBtn {
+  width: 100%;
+  border: 1px solid #3b82f6;
+  background: #3b82f6;
+  color: #ffffff;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.modalMask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 1000;
+}
+
+.modal {
+  width: min(520px, 100%);
+  border-radius: 14px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.2);
+  padding: 16px;
+}
+
+.modalTitle {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.fileInput {
+  width: 100%;
+  font-size: 14px;
+}
+
+.fileName {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #4b5563;
+}
+
+.progressWrap {
+  margin-top: 12px;
+}
+
+.progressBar {
+  width: 100%;
+  height: 10px;
+  background: #e5e7eb;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progressValue {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 100%);
+  transition: width 0.2s ease;
+}
+
+.progressText {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.modalActions {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.btnGhost {
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #1f2329;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.btnPrimary {
+  border: 1px solid #3b82f6;
+  background: #3b82f6;
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.btnGhost:disabled,
+.btnPrimary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@media (max-width: 960px) {
+  .page {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    min-height: auto;
+  }
+}
