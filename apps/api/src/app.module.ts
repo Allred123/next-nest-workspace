@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
 import { AiModule } from "./ai/ai.module";
-import { ConfigModule } from "@nestjs/config";
+import { ConfigModule, ConfigService } from "@nestjs/config";
 import { ControllerService } from "./controller/controller.service";
 import { SpeechModule } from "./speech/speech.module";
 import { ServeStaticModule } from "@nestjs/serve-static";
@@ -14,22 +14,26 @@ import { Book } from "./book/entities/book.entities";
 
 @Module({
   imports: [
-    AiModule,
-    TypeOrmModule.forRoot({
-      type: "mysql",
-      host: "localhost",
-      port: 3306,
-      username: "root",
-      password: "admin",
-      database: "hello",
-      synchronize: true,
-      connectorPackage: "mysql2",
-      logging: true,
-      entities: [Book],
-    }),
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: ".env",
+    }),
+    AiModule,
+    TypeOrmModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        type: "mysql" as const,
+        host: configService.get<string>("DB_HOST") ?? "localhost",
+        port: Number(configService.get<string>("DB_PORT") ?? 3306),
+        username: configService.get<string>("DB_USER") ?? "root",
+        password: configService.get<string>("DB_PASS") ?? "admin",
+        database: configService.get<string>("DB_NAME") ?? "hello",
+        synchronize:
+          (configService.get<string>("DB_SYNCHRONIZE") ?? "true") === "true",
+        logging: (configService.get<string>("DB_LOGGING") ?? "true") === "true",
+        connectorPackage: "mysql2",
+        entities: [Book],
+      }),
     }),
     EventEmitterModule.forRoot({
       maxListeners: 200,

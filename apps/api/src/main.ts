@@ -24,9 +24,24 @@ async function bootstrap() {
     });
   });
 
+  const allowedOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:3000")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const allowAllOrigins = allowedOrigins.includes("*");
+
   app.enableCors({
-    origin: "http://localhost:3000",
     credentials: true,
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void,
+    ) => {
+      if (!origin || allowAllOrigins || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error(`CORS blocked for origin: ${origin}`), false);
+    },
   });
 
   const port = Number(process.env.PORT ?? 3001);

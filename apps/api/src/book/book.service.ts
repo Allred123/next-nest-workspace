@@ -7,11 +7,14 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { InjectRepository } from "@nestjs/typeorm";
 import { EventEmitter2 } from "@nestjs/event-emitter";
-import { mkdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { extname, join, parse } from "node:path";
 import type { Express } from "express";
 import { pinyin } from "pinyin-pro";
 import { Repository } from "typeorm";
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { EPubLoader } from "@langchain/community/document_loaders/fs/epub";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
@@ -36,6 +39,9 @@ const DEFAULT_TOP_K = 5;
 const EMBEDDING_BATCH_SIZE = 10;
 const ALLOWED_MIME_TYPES = ["text/plain", "application/epub+zip"];
 const BOOK_UPLOAD_DIR = join(process.cwd(), "storage", "books");
+const LOCAL_TEMP_BOOK_DIR = join(tmpdir(), "new-ai-agent-books");
+
+type StorageDriver = "local" | "s3";
 
 type ReadInput = {
   query: string;
@@ -59,10 +65,21 @@ type SearchRow = {
   score?: number;
 };
 
+type PersistedUploadFile = {
+  persistedFilePath: string;
+  parserFilePath: string;
+  cleanup?: () => Promise<void>;
+};
+
 @Injectable()
 export class BookService {
   private readonly vectorDim: number;
   private readonly milvusClient: MilvusClient;
+  private readonly storageDriver: StorageDriver;
+  private readonly s3Client?: S3Client;
+  private readonly s3Bucket?: string;
+  private readonly s3KeyPrefix: string;
+  private readonly s3PublicBaseUrl?: string;
 
   constructor(
     @Inject("CHAT_MODEL") private readonly chatModel: ChatOpenAI,
@@ -75,10 +92,60 @@ export class BookService {
     this.vectorDim = Number(
       this.configService.get<string>("EMBEDDINGS_DIM") ?? DEFAULT_VECTOR_DIM,
     );
+    const milvusToken = this.configService.get<string>("MILVUS_TOKEN")?.trim();
     this.milvusClient = new MilvusClient({
       address:
         this.configService.get<string>("MILVUS_ADDRESS") ?? "localhost:19530",
+      token: milvusToken || undefined,
     });
+    this.storageDriver = (
+      this.configService.get<string>("STORAGE_DRIVER") ?? "local"
+    ).toLowerCase() as StorageDriver;
+    this.s3KeyPrefix = (
+      this.configService.get<string>("S3_KEY_PREFIX") ?? "books"
+    )
+      .replace(/^\/+|\/+$/g, "")
+      .trim();
+    this.s3PublicBaseUrl = this.configService
+      .get<string>("S3_PUBLIC_BASE_URL")
+      ?.replace(/\/+$/g, "")
+      .trim();
+
+    if (this.storageDriver === "s3") {
+      const region = this.configService.get<string>("S3_REGION")?.trim();
+      const bucket = this.configService.get<string>("S3_BUCKET")?.trim();
+      if (!region || !bucket) {
+        throw new Error(
+          "S3 storage requires S3_REGION and S3_BUCKET environment variables.",
+        );
+      }
+
+      const accessKeyId = this.configService
+        .get<string>("S3_ACCESS_KEY_ID")
+        ?.trim();
+      const secretAccessKey = this.configService
+        .get<string>("S3_SECRET_ACCESS_KEY")
+        ?.trim();
+      const endpoint = this.configService.get<string>("S3_ENDPOINT")?.trim();
+      const forcePathStyle =
+        (this.configService.get<string>("S3_FORCE_PATH_STYLE") ?? "false") ===
+        "true";
+
+      this.s3Bucket = bucket;
+      this.s3Client = new S3Client({
+        region,
+        endpoint: endpoint || undefined,
+        forcePathStyle,
+        credentials:
+          accessKeyId && secretAccessKey
+            ? { accessKeyId, secretAccessKey }
+            : undefined,
+      });
+    } else if (this.storageDriver !== "local") {
+      throw new Error(
+        `Unsupported STORAGE_DRIVER "${this.storageDriver}". Use "local" or "s3".`,
+      );
+    }
   }
 
   async listBooks() {
@@ -126,17 +193,19 @@ export class BookService {
       );
     }
 
-    await mkdir(BOOK_UPLOAD_DIR, { recursive: true });
     const normalizedExt = fileExt || ".epub";
     const savedFileName = `${bookNamePinyin}-${Date.now()}${normalizedExt}`;
-    const savedFilePath = join(BOOK_UPLOAD_DIR, savedFileName);
-    await writeFile(savedFilePath, file.buffer);
+    const uploadedFile = await this.persistUploadedBookFile({
+      savedFileName,
+      fileBuffer: file.buffer,
+      contentType: file.mimetype,
+    });
 
     const entity = this.bookRepo.create({
       bookName: sourceBookName,
       bookNamePinyin,
       milvusCollection,
-      filePath: savedFilePath,
+      filePath: uploadedFile.persistedFilePath,
       originalFileName,
     });
 
@@ -151,11 +220,18 @@ export class BookService {
       input.chunkOverlap && input.chunkOverlap >= 0
         ? input.chunkOverlap
         : DEFAULT_CHUNK_OVERLAP;
-    const documents = await this.loadBookDocuments(
-      savedFilePath,
-      file.buffer,
-      normalizedExt,
-    );
+    let documents: Array<{ pageContent: string }> = [];
+    try {
+      documents = await this.loadBookDocuments(
+        uploadedFile.parserFilePath,
+        file.buffer,
+        normalizedExt,
+      );
+    } finally {
+      if (uploadedFile.cleanup) {
+        await uploadedFile.cleanup();
+      }
+    }
     const splitter = new RecursiveCharacterTextSplitter({
       chunkSize,
       chunkOverlap,
@@ -410,6 +486,61 @@ export class BookService {
 
     const loader = new EPubLoader(savedFilePath, { splitChapters: true });
     return loader.load();
+  }
+
+  private async persistUploadedBookFile(input: {
+    savedFileName: string;
+    fileBuffer: Buffer;
+    contentType?: string;
+  }): Promise<PersistedUploadFile> {
+    if (this.storageDriver === "local") {
+      await mkdir(BOOK_UPLOAD_DIR, { recursive: true });
+      const savedFilePath = join(BOOK_UPLOAD_DIR, input.savedFileName);
+      await writeFile(savedFilePath, input.fileBuffer);
+      return {
+        persistedFilePath: savedFilePath,
+        parserFilePath: savedFilePath,
+      };
+    }
+
+    if (!this.s3Client || !this.s3Bucket) {
+      throw new Error("S3 client is not initialized");
+    }
+
+    await mkdir(LOCAL_TEMP_BOOK_DIR, { recursive: true });
+    const parserFilePath = join(
+      LOCAL_TEMP_BOOK_DIR,
+      `${Date.now()}-${randomUUID()}-${input.savedFileName}`,
+    );
+    await writeFile(parserFilePath, input.fileBuffer);
+
+    const key = this.s3KeyPrefix
+      ? `${this.s3KeyPrefix}/${input.savedFileName}`
+      : input.savedFileName;
+
+    try {
+      await this.s3Client.send(
+        new PutObjectCommand({
+          Bucket: this.s3Bucket,
+          Key: key,
+          Body: input.fileBuffer,
+          ContentType: input.contentType || "application/octet-stream",
+        }),
+      );
+    } catch (error) {
+      await rm(parserFilePath, { force: true });
+      throw error;
+    }
+
+    return {
+      persistedFilePath: this.s3PublicBaseUrl
+        ? `${this.s3PublicBaseUrl}/${key}`
+        : `s3://${this.s3Bucket}/${key}`,
+      parserFilePath,
+      cleanup: async () => {
+        await rm(parserFilePath, { force: true });
+      },
+    };
   }
 
   private normalizeOriginalFilename(fileName: string) {
