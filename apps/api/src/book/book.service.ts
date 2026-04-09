@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -37,6 +38,7 @@ const DEFAULT_CHUNK_SIZE = 500;
 const DEFAULT_CHUNK_OVERLAP = 50;
 const DEFAULT_TOP_K = 5;
 const EMBEDDING_BATCH_SIZE = 10;
+const SAVE_STEP_TIMEOUT_MS = 30_000;
 const ALLOWED_MIME_TYPES = ["text/plain", "application/epub+zip"];
 const BOOK_UPLOAD_DIR = join(process.cwd(), "storage", "books");
 const LOCAL_TEMP_BOOK_DIR = join(tmpdir(), "new-ai-agent-books");
@@ -73,6 +75,7 @@ type PersistedUploadFile = {
 
 @Injectable()
 export class BookService {
+  private readonly logger = new Logger(BookService.name);
   private readonly vectorDim: number;
   private readonly milvusClient: MilvusClient;
   private readonly storageDriver: StorageDriver;
@@ -184,9 +187,13 @@ export class BookService {
     const bookNamePinyin = this.toPinyinSlug(sourceBookName);
     const milvusCollection = bookNamePinyin;
 
-    const existing = await this.bookRepo.findOne({
-      where: [{ bookNamePinyin }, { milvusCollection }],
-    });
+    this.logger.log(`saveBook start: bookNamePinyin=${bookNamePinyin}`);
+    const existing = await this.withTimeout(
+      this.bookRepo.findOne({
+        where: [{ bookNamePinyin }, { milvusCollection }],
+      }),
+      "mysql-find-existing-book",
+    );
     if (existing) {
       throw new BadRequestException(
         `Book already exists: ${existing.bookName}`,
@@ -195,11 +202,14 @@ export class BookService {
 
     const normalizedExt = fileExt || ".epub";
     const savedFileName = `${bookNamePinyin}-${Date.now()}${normalizedExt}`;
-    const uploadedFile = await this.persistUploadedBookFile({
-      savedFileName,
-      fileBuffer: file.buffer,
-      contentType: file.mimetype,
-    });
+    const uploadedFile = await this.withTimeout(
+      this.persistUploadedBookFile({
+        savedFileName,
+        fileBuffer: file.buffer,
+        contentType: file.mimetype,
+      }),
+      "persist-uploaded-file",
+    );
 
     const entity = this.bookRepo.create({
       bookName: sourceBookName,
@@ -209,8 +219,11 @@ export class BookService {
       originalFileName,
     });
 
-    await this.milvusClient.connectPromise;
-    await this.ensureCollection(milvusCollection);
+    await this.withTimeout(this.milvusClient.connectPromise, "milvus-connect");
+    await this.withTimeout(
+      this.ensureCollection(milvusCollection),
+      "milvus-ensure-collection",
+    );
 
     const chunkSize =
       input.chunkSize && input.chunkSize > 0
@@ -222,10 +235,13 @@ export class BookService {
         : DEFAULT_CHUNK_OVERLAP;
     let documents: Array<{ pageContent: string }> = [];
     try {
-      documents = await this.loadBookDocuments(
-        uploadedFile.parserFilePath,
-        file.buffer,
-        normalizedExt,
+      documents = await this.withTimeout(
+        this.loadBookDocuments(
+          uploadedFile.parserFilePath,
+          file.buffer,
+          normalizedExt,
+        ),
+        "load-book-documents",
       );
     } finally {
       if (uploadedFile.cleanup) {
@@ -247,7 +263,10 @@ export class BookService {
       const chunks = await splitter.splitText(chapter.pageContent);
       if (!chunks.length) continue;
 
-      const vectors = await this.embedDocumentsInBatches(chunks);
+      const vectors = await this.withTimeout(
+        this.embedDocumentsInBatches(chunks),
+        `embed-documents-chapter-${chapterIndex + 1}`,
+      );
       const now = Date.now();
       const data = chunks.map((content, idx) => ({
         id: `${bookNamePinyin}_${chapterIndex + 1}_${idx}_${now}`,
@@ -257,14 +276,23 @@ export class BookService {
         vector: vectors[idx],
       }));
 
-      const result = await this.milvusClient.insert({
-        collection_name: milvusCollection,
-        data,
-      });
+      const result = await this.withTimeout(
+        this.milvusClient.insert({
+          collection_name: milvusCollection,
+          data,
+        }),
+        `milvus-insert-chapter-${chapterIndex + 1}`,
+      );
       totalChunks += Number(result.insert_cnt ?? data.length);
     }
 
-    const savedBook = await this.bookRepo.save(entity);
+    const savedBook = await this.withTimeout(
+      this.bookRepo.save(entity),
+      "mysql-save-book",
+    );
+    this.logger.log(
+      `saveBook done: bookId=${savedBook.id}, chapters=${documents.length}, inserted=${totalChunks}`,
+    );
 
     return {
       ok: true,
@@ -548,6 +576,29 @@ export class BookService {
       return Buffer.from(fileName, "latin1").toString("utf8");
     } catch {
       return fileName;
+    }
+  }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    label: string,
+    timeoutMs = SAVE_STEP_TIMEOUT_MS,
+  ): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`[saveBook timeout] step=${label}, timeoutMs=${timeoutMs}`));
+      }, timeoutMs);
+    });
+
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`[saveBook failed] step=${label}, reason=${message}`);
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 }

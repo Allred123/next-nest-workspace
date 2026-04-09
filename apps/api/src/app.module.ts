@@ -33,6 +33,17 @@ import { Book } from "./book/entities/book.entities";
         logging: (configService.get<string>("DB_LOGGING") ?? "true") === "true",
         connectorPackage: "mysql2",
         entities: [Book],
+        extra: {
+          // Prevent requests from waiting forever when DB or pool is unhealthy.
+          connectTimeout: Number(
+            configService.get<string>("DB_CONNECT_TIMEOUT_MS") ?? 10000,
+          ),
+          acquireTimeout: Number(
+            configService.get<string>("DB_ACQUIRE_TIMEOUT_MS") ?? 10000,
+          ),
+          enableKeepAlive: true,
+          keepAliveInitialDelay: 10000,
+        },
       }),
     }),
     EventEmitterModule.forRoot({
