@@ -173,3 +173,85 @@ pnpm --filter api build
 ## License
 
 仅供学习与交流使用。
+
+## 线上部署
+
+- 前端（Vercel）：https://next-nest-workspace.vercel.app
+- 后端 API（Railway）：`apps/api` 服务
+- MySQL（Railway）：Railway MySQL 服务
+- 向量数据库（Zilliz Cloud Milvus）：托管 Milvus 实例
+
+### 部署架构
+
+- Vercel 部署 `apps/web`
+- Railway 部署 `apps/api`，并承载 API + MySQL 运行环境
+- Zilliz 提供外部 Milvus 向量检索能力
+- `apps/web` 通过 `NEXT_PUBLIC_API_BASE_URL` 访问 Railway API
+- `apps/api` 连接 Railway MySQL 与 Zilliz Milvus
+
+### 部署流程
+
+1. 准备 GitHub 仓库
+- 将 Monorepo 代码推送到 GitHub（建议使用 `main` 分支）。
+
+2. 在 Vercel 部署前端
+- 在 Vercel 中导入该仓库。
+- Root Directory 设置为 `apps/web`。
+- Build Command 使用：`pnpm --filter web build`
+- 输出目录按 Next.js 默认配置即可。
+- 配置环境变量：
+  - `NEXT_PUBLIC_API_BASE_URL=https://<你的-railway-api-域名>`
+- 部署完成后，线上地址示例：
+  - `https://next-nest-workspace.vercel.app`
+
+3. 在 Railway 部署 API
+- 在 Railway 中基于同一 GitHub 仓库创建服务。
+- Root Directory 设置为 `apps/api`。
+- 启动命令可使用 `pnpm --filter api start`（或继续使用当前可工作的 Railway/Nixpacks 默认配置）。
+- 在 Railway 中配置 `apps/api/.env` 对应变量：
+  - `OPENAI_API_KEY`
+  - `OPENAI_BASE_URL`
+  - `MODEL_NAME`
+  - `EMBEDDINGS_MODEL_NAME`
+  - `EMBEDDINGS_DIM`
+  - `MILVUS_ADDRESS`
+  - `MILVUS_TOKEN`
+  - `DB_HOST`
+  - `DB_PORT`
+  - `DB_USER`
+  - `DB_PASS`
+  - `DB_NAME`
+  - `SECRET_ID`
+  - `SECRET_KEY`
+  - `APP_ID`
+  - `TTS_VOICE_TYPE`
+  - `BOCHA_API_KEY`
+  - `MAIL_HOST`
+  - `MAIL_PORT`
+  - `MAIL_SECURE`
+  - `MAIL_USER`
+  - `MAIL_PASS`
+  - `MAIL_FROM`
+
+4. 在 Railway 创建 MySQL
+- 在同一个 Railway Project 中添加 MySQL 服务/插件。
+- 将生成的连接信息写入 API 环境变量：
+  - `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASS`、`DB_NAME`
+
+5. 在 Zilliz Cloud 创建 Milvus
+- 创建 Zilliz Cloud 集群/数据库。
+- 将连接信息写入 Railway API 环境变量：
+  - `MILVUS_ADDRESS`
+  - `MILVUS_TOKEN`
+- 确保 `EMBEDDINGS_DIM` 与 Embedding 模型输出维度一致。
+
+6. 打通前后端
+- 在 Vercel 配置：
+  - `NEXT_PUBLIC_API_BASE_URL=https://<你的-railway-api-域名>`
+- 更新变量后重新部署 Vercel。
+
+7. 部署验证
+- 打开前端地址并验证以下接口：
+  - 通用聊天：`POST /ai/chat`
+  - 书籍上传：`POST /book/save`
+  - 书籍问答流式：`POST /book/read`
