@@ -46,6 +46,7 @@ const SAVE_TIMEOUT_LOAD_DOCUMENTS_MS = 120_000;
 const SAVE_TIMEOUT_EMBED_CHAPTER_MS = 180_000;
 const SAVE_TIMEOUT_MILVUS_INSERT_CHAPTER_MS = 300_000;
 const SAVE_TIMEOUT_MYSQL_SAVE_MS = 30_000;
+const MILVUS_INSERT_BATCH_SIZE = 50;
 const ALLOWED_MIME_TYPES = ["text/plain", "application/epub+zip"];
 const BOOK_UPLOAD_DIR = join(process.cwd(), "storage", "books");
 const LOCAL_TEMP_BOOK_DIR = join(tmpdir(), "new-ai-agent-books");
@@ -92,6 +93,7 @@ export class BookService {
   private readonly saveTimeoutEmbedChapterMs: number;
   private readonly saveTimeoutMilvusInsertChapterMs: number;
   private readonly saveTimeoutMysqlSaveMs: number;
+  private readonly milvusInsertBatchSize: number;
   private readonly milvusClient: MilvusClient;
   private readonly storageDriver: StorageDriver;
   private readonly s3Client?: S3Client;
@@ -142,6 +144,10 @@ export class BookService {
     this.saveTimeoutMysqlSaveMs = Number(
       this.configService.get<string>("SAVE_TIMEOUT_MYSQL_SAVE_MS") ??
         SAVE_TIMEOUT_MYSQL_SAVE_MS,
+    );
+    this.milvusInsertBatchSize = Number(
+      this.configService.get<string>("MILVUS_INSERT_BATCH_SIZE") ??
+        MILVUS_INSERT_BATCH_SIZE,
     );
     const milvusToken = this.configService.get<string>("MILVUS_TOKEN")?.trim();
     this.milvusClient = new MilvusClient({
@@ -333,15 +339,20 @@ export class BookService {
         vector: vectors[idx],
       }));
 
-      const result = await this.withTimeout(
-        this.milvusClient.insert({
-          collection_name: milvusCollection,
-          data,
-        }),
-        `milvus-insert-chapter-${chapterIndex + 1}`,
-        this.saveTimeoutMilvusInsertChapterMs,
-      );
-      totalChunks += Number(result.insert_cnt ?? data.length);
+      let chapterInserted = 0;
+      for (let offset = 0; offset < data.length; offset += this.milvusInsertBatchSize) {
+        const batch = data.slice(offset, offset + this.milvusInsertBatchSize);
+        const result = await this.withTimeout(
+          this.milvusClient.insert({
+            collection_name: milvusCollection,
+            data: batch,
+          }),
+          `milvus-insert-chapter-${chapterIndex + 1}-batch-${Math.floor(offset / this.milvusInsertBatchSize) + 1}`,
+          this.saveTimeoutMilvusInsertChapterMs,
+        );
+        chapterInserted += Number(result.insert_cnt ?? batch.length);
+      }
+      totalChunks += chapterInserted;
     }
 
     const savedBook = await this.withTimeout(
