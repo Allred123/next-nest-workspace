@@ -53,6 +53,8 @@ export function ChatPage({
   const [isRecording, setIsRecording] = useState(false);
   const [speechEnabled, setSpeechEnabled] = useState(true);
   const [sendDisabled, setSendDisabled] = useState(false);
+  const speechEnabledRef = useRef(speechEnabled);
+  const getExtraStreamParamsRef = useRef(getExtraStreamParams);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const memorySessionIdRef = useRef<string>(uid());
@@ -69,6 +71,14 @@ export function ChatPage({
   const ttsStreamFinalRef = useRef(false);
   const ttsObjectUrlRef = useRef<string | null>(null);
   const ttsUserPausedRef = useRef(false);
+
+  useEffect(() => {
+    speechEnabledRef.current = speechEnabled;
+  }, [speechEnabled]);
+
+  useEffect(() => {
+    getExtraStreamParamsRef.current = getExtraStreamParams;
+  }, [getExtraStreamParams]);
 
   const status = useMemo(
     () => ({
@@ -88,12 +98,12 @@ export function ChatPage({
           body: {
             messages,
             sessionId: memorySessionIdRef.current,
-            ttsSessionId: speechEnabled ? ttsSessionIdRef.current ?? undefined : undefined,
-            ...(getExtraStreamParams?.() ?? {}),
+            ttsSessionId: speechEnabledRef.current ? ttsSessionIdRef.current ?? undefined : undefined,
+            ...(getExtraStreamParamsRef.current?.() ?? {}),
           },
         }),
       }),
-    [getExtraStreamParams, speechEnabled, streamPath],
+    [streamPath],
   );
 
   const { messages, setMessages, sendMessage, stop, status: chatStatus, error } = useChat<ChatMessage>({
