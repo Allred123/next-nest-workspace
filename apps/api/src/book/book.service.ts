@@ -38,7 +38,14 @@ const DEFAULT_CHUNK_SIZE = 500;
 const DEFAULT_CHUNK_OVERLAP = 50;
 const DEFAULT_TOP_K = 5;
 const EMBEDDING_BATCH_SIZE = 10;
-const SAVE_STEP_TIMEOUT_MS = 30_000;
+const SAVE_TIMEOUT_MYSQL_FIND_MS = 30_000;
+const SAVE_TIMEOUT_PERSIST_FILE_MS = 60_000;
+const SAVE_TIMEOUT_MILVUS_CONNECT_MS = 45_000;
+const SAVE_TIMEOUT_MILVUS_ENSURE_COLLECTION_MS = 120_000;
+const SAVE_TIMEOUT_LOAD_DOCUMENTS_MS = 120_000;
+const SAVE_TIMEOUT_EMBED_CHAPTER_MS = 180_000;
+const SAVE_TIMEOUT_MILVUS_INSERT_CHAPTER_MS = 300_000;
+const SAVE_TIMEOUT_MYSQL_SAVE_MS = 30_000;
 const ALLOWED_MIME_TYPES = ["text/plain", "application/epub+zip"];
 const BOOK_UPLOAD_DIR = join(process.cwd(), "storage", "books");
 const LOCAL_TEMP_BOOK_DIR = join(tmpdir(), "new-ai-agent-books");
@@ -77,6 +84,14 @@ type PersistedUploadFile = {
 export class BookService {
   private readonly logger = new Logger(BookService.name);
   private readonly vectorDim: number;
+  private readonly saveTimeoutMysqlFindMs: number;
+  private readonly saveTimeoutPersistFileMs: number;
+  private readonly saveTimeoutMilvusConnectMs: number;
+  private readonly saveTimeoutMilvusEnsureCollectionMs: number;
+  private readonly saveTimeoutLoadDocumentsMs: number;
+  private readonly saveTimeoutEmbedChapterMs: number;
+  private readonly saveTimeoutMilvusInsertChapterMs: number;
+  private readonly saveTimeoutMysqlSaveMs: number;
   private readonly milvusClient: MilvusClient;
   private readonly storageDriver: StorageDriver;
   private readonly s3Client?: S3Client;
@@ -94,6 +109,39 @@ export class BookService {
   ) {
     this.vectorDim = Number(
       this.configService.get<string>("EMBEDDINGS_DIM") ?? DEFAULT_VECTOR_DIM,
+    );
+    this.saveTimeoutMysqlFindMs = Number(
+      this.configService.get<string>("SAVE_TIMEOUT_MYSQL_FIND_MS") ??
+        SAVE_TIMEOUT_MYSQL_FIND_MS,
+    );
+    this.saveTimeoutPersistFileMs = Number(
+      this.configService.get<string>("SAVE_TIMEOUT_PERSIST_FILE_MS") ??
+        SAVE_TIMEOUT_PERSIST_FILE_MS,
+    );
+    this.saveTimeoutMilvusConnectMs = Number(
+      this.configService.get<string>("SAVE_TIMEOUT_MILVUS_CONNECT_MS") ??
+        SAVE_TIMEOUT_MILVUS_CONNECT_MS,
+    );
+    this.saveTimeoutMilvusEnsureCollectionMs = Number(
+      this.configService.get<string>(
+        "SAVE_TIMEOUT_MILVUS_ENSURE_COLLECTION_MS",
+      ) ?? SAVE_TIMEOUT_MILVUS_ENSURE_COLLECTION_MS,
+    );
+    this.saveTimeoutLoadDocumentsMs = Number(
+      this.configService.get<string>("SAVE_TIMEOUT_LOAD_DOCUMENTS_MS") ??
+        SAVE_TIMEOUT_LOAD_DOCUMENTS_MS,
+    );
+    this.saveTimeoutEmbedChapterMs = Number(
+      this.configService.get<string>("SAVE_TIMEOUT_EMBED_CHAPTER_MS") ??
+        SAVE_TIMEOUT_EMBED_CHAPTER_MS,
+    );
+    this.saveTimeoutMilvusInsertChapterMs = Number(
+      this.configService.get<string>("SAVE_TIMEOUT_MILVUS_INSERT_CHAPTER_MS") ??
+        SAVE_TIMEOUT_MILVUS_INSERT_CHAPTER_MS,
+    );
+    this.saveTimeoutMysqlSaveMs = Number(
+      this.configService.get<string>("SAVE_TIMEOUT_MYSQL_SAVE_MS") ??
+        SAVE_TIMEOUT_MYSQL_SAVE_MS,
     );
     const milvusToken = this.configService.get<string>("MILVUS_TOKEN")?.trim();
     this.milvusClient = new MilvusClient({
@@ -193,6 +241,7 @@ export class BookService {
         where: [{ bookNamePinyin }, { milvusCollection }],
       }),
       "mysql-find-existing-book",
+      this.saveTimeoutMysqlFindMs,
     );
     if (existing) {
       throw new BadRequestException(
@@ -209,6 +258,7 @@ export class BookService {
         contentType: file.mimetype,
       }),
       "persist-uploaded-file",
+      this.saveTimeoutPersistFileMs,
     );
 
     const entity = this.bookRepo.create({
@@ -219,10 +269,15 @@ export class BookService {
       originalFileName,
     });
 
-    await this.withTimeout(this.milvusClient.connectPromise, "milvus-connect");
+    await this.withTimeout(
+      this.milvusClient.connectPromise,
+      "milvus-connect",
+      this.saveTimeoutMilvusConnectMs,
+    );
     await this.withTimeout(
       this.ensureCollection(milvusCollection),
       "milvus-ensure-collection",
+      this.saveTimeoutMilvusEnsureCollectionMs,
     );
 
     const chunkSize =
@@ -242,6 +297,7 @@ export class BookService {
           normalizedExt,
         ),
         "load-book-documents",
+        this.saveTimeoutLoadDocumentsMs,
       );
     } finally {
       if (uploadedFile.cleanup) {
@@ -266,6 +322,7 @@ export class BookService {
       const vectors = await this.withTimeout(
         this.embedDocumentsInBatches(chunks),
         `embed-documents-chapter-${chapterIndex + 1}`,
+        this.saveTimeoutEmbedChapterMs,
       );
       const now = Date.now();
       const data = chunks.map((content, idx) => ({
@@ -282,6 +339,7 @@ export class BookService {
           data,
         }),
         `milvus-insert-chapter-${chapterIndex + 1}`,
+        this.saveTimeoutMilvusInsertChapterMs,
       );
       totalChunks += Number(result.insert_cnt ?? data.length);
     }
@@ -289,6 +347,7 @@ export class BookService {
     const savedBook = await this.withTimeout(
       this.bookRepo.save(entity),
       "mysql-save-book",
+      this.saveTimeoutMysqlSaveMs,
     );
     this.logger.log(
       `saveBook done: bookId=${savedBook.id}, chapters=${documents.length}, inserted=${totalChunks}`,
@@ -582,7 +641,7 @@ export class BookService {
   private async withTimeout<T>(
     promise: Promise<T>,
     label: string,
-    timeoutMs = SAVE_STEP_TIMEOUT_MS,
+    timeoutMs: number,
   ): Promise<T> {
     let timer: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
