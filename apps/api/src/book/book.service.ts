@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  RequestTimeoutException,
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -48,7 +49,7 @@ const SAVE_TIMEOUT_EMBED_CHAPTER_MS = 180_000;
 const SAVE_TIMEOUT_MILVUS_INSERT_CHAPTER_MS = 300_000;
 const SAVE_TIMEOUT_MYSQL_SAVE_MS = 30_000;
 const MILVUS_INSERT_BATCH_SIZE = 20;
-const MILVUS_INSERT_RPC_TIMEOUT_MS = 60_000;
+const MILVUS_INSERT_RPC_TIMEOUT_MS = 30_000;
 const MILVUS_INSERT_RETRY_MAX = 3;
 const MILVUS_INSERT_RETRY_BACKOFF_MS = 1_000;
 const ALLOWED_MIME_TYPES = ["text/plain", "application/epub+zip"];
@@ -834,6 +835,11 @@ export class BookService {
             "Milvus 连接已断开，请稍后重试。",
           );
         }
+        if (this.isMilvusDeadlineExceededError(message)) {
+          throw new RequestTimeoutException(
+            "Milvus 写入超时，请稍后重试或减小单次上传文件大小。",
+          );
+        }
         if (this.isMilvusUnavailableError(message)) {
           throw new ServiceUnavailableException(
             "Milvus 当前不可用，请稍后重试。",
@@ -873,6 +879,11 @@ export class BookService {
   private isMilvusUnavailableError(message: string): boolean {
     const msg = message.toLowerCase();
     return msg.includes("unavailable");
+  }
+
+  private isMilvusDeadlineExceededError(message: string): boolean {
+    const msg = message.toLowerCase();
+    return msg.includes("deadline exceeded") || msg.includes("code 4");
   }
 
   private isMilvusConnectionDroppedError(message: string): boolean {
