@@ -46,7 +46,10 @@ const SAVE_TIMEOUT_LOAD_DOCUMENTS_MS = 120_000;
 const SAVE_TIMEOUT_EMBED_CHAPTER_MS = 180_000;
 const SAVE_TIMEOUT_MILVUS_INSERT_CHAPTER_MS = 300_000;
 const SAVE_TIMEOUT_MYSQL_SAVE_MS = 30_000;
-const MILVUS_INSERT_BATCH_SIZE = 50;
+const MILVUS_INSERT_BATCH_SIZE = 20;
+const MILVUS_INSERT_RPC_TIMEOUT_MS = 60_000;
+const MILVUS_INSERT_RETRY_MAX = 3;
+const MILVUS_INSERT_RETRY_BACKOFF_MS = 1_000;
 const ALLOWED_MIME_TYPES = ["text/plain", "application/epub+zip"];
 const BOOK_UPLOAD_DIR = join(process.cwd(), "storage", "books");
 const LOCAL_TEMP_BOOK_DIR = join(tmpdir(), "new-ai-agent-books");
@@ -92,6 +95,14 @@ type EvaluationResult = {
   webQuery?: string;
 };
 
+type MilvusInsertRow = {
+  id: string;
+  chapter_num: number;
+  index: number;
+  content: string;
+  vector: number[];
+};
+
 type PersistedUploadFile = {
   persistedFilePath: string;
   parserFilePath: string;
@@ -111,6 +122,9 @@ export class BookService {
   private readonly saveTimeoutMilvusInsertChapterMs: number;
   private readonly saveTimeoutMysqlSaveMs: number;
   private readonly milvusInsertBatchSize: number;
+  private readonly milvusInsertRpcTimeoutMs: number;
+  private readonly milvusInsertRetryMax: number;
+  private readonly milvusInsertRetryBackoffMs: number;
   private readonly milvusClient: MilvusClient;
   private readonly storageDriver: StorageDriver;
   private readonly s3Client?: S3Client;
@@ -167,11 +181,28 @@ export class BookService {
       this.configService.get<string>("MILVUS_INSERT_BATCH_SIZE") ??
         MILVUS_INSERT_BATCH_SIZE,
     );
+    this.milvusInsertRpcTimeoutMs = Number(
+      this.configService.get<string>("MILVUS_INSERT_RPC_TIMEOUT_MS") ??
+        MILVUS_INSERT_RPC_TIMEOUT_MS,
+    );
+    this.milvusInsertRetryMax = Number(
+      this.configService.get<string>("MILVUS_INSERT_RETRY_MAX") ??
+        MILVUS_INSERT_RETRY_MAX,
+    );
+    this.milvusInsertRetryBackoffMs = Number(
+      this.configService.get<string>("MILVUS_INSERT_RETRY_BACKOFF_MS") ??
+        MILVUS_INSERT_RETRY_BACKOFF_MS,
+    );
     const milvusToken = this.configService.get<string>("MILVUS_TOKEN")?.trim();
+    const milvusAddress =
+      this.configService.get<string>("MILVUS_ADDRESS") ?? "localhost:19530";
+    const milvusSsl =
+      (this.configService.get<string>("MILVUS_SSL") ?? "false") === "true" ||
+      /^https:\/\//i.test(milvusAddress);
     this.milvusClient = new MilvusClient({
-      address:
-        this.configService.get<string>("MILVUS_ADDRESS") ?? "localhost:19530",
+      address: milvusAddress,
       token: milvusToken || undefined,
+      ssl: milvusSsl,
     });
     void this.milvusClient.connectPromise.catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -353,7 +384,7 @@ export class BookService {
         this.saveTimeoutEmbedChapterMs,
       );
       const now = Date.now();
-      const data = chunks.map((content, idx) => ({
+      const data: MilvusInsertRow[] = chunks.map((content, idx) => ({
         id: `${bookNamePinyin}_${chapterIndex + 1}_${idx}_${now}`,
         chapter_num: chapterIndex + 1,
         index: idx,
@@ -364,12 +395,15 @@ export class BookService {
       let chapterInserted = 0;
       for (let offset = 0; offset < data.length; offset += this.milvusInsertBatchSize) {
         const batch = data.slice(offset, offset + this.milvusInsertBatchSize);
+        const batchNo = Math.floor(offset / this.milvusInsertBatchSize) + 1;
         const result = await this.withTimeout(
-          this.milvusClient.insert({
-            collection_name: milvusCollection,
-            data: batch,
-          }),
-          `milvus-insert-chapter-${chapterIndex + 1}-batch-${Math.floor(offset / this.milvusInsertBatchSize) + 1}`,
+          this.insertBatchWithRetry(
+            milvusCollection,
+            batch,
+            chapterIndex + 1,
+            batchNo,
+          ),
+          `milvus-insert-chapter-${chapterIndex + 1}-batch-${batchNo}`,
           this.saveTimeoutMilvusInsertChapterMs,
         );
         chapterInserted += Number(result.insert_cnt ?? batch.length);
@@ -771,6 +805,62 @@ export class BookService {
       cursor += maxLength;
     }
     return chunks;
+  }
+
+  private async insertBatchWithRetry(
+    collectionName: string,
+    batch: MilvusInsertRow[],
+    chapterNo: number,
+    batchNo: number,
+  ) {
+    let attempt = 0;
+    let lastError: unknown;
+    const maxAttempts = Math.max(1, this.milvusInsertRetryMax);
+
+    while (attempt < maxAttempts) {
+      attempt += 1;
+      try {
+        return await this.milvusClient.insert({
+          collection_name: collectionName,
+          data: batch,
+          timeout: this.milvusInsertRpcTimeoutMs,
+        });
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        const canRetry =
+          attempt < maxAttempts && this.isRetryableMilvusInsertError(message);
+        this.logger.warn(
+          `[milvus insert retry] chapter=${chapterNo}, batch=${batchNo}, attempt=${attempt}/${maxAttempts}, retry=${canRetry}, reason=${message}`,
+        );
+        if (!canRetry) {
+          throw error;
+        }
+        const waitMs = this.milvusInsertRetryBackoffMs * Math.pow(2, attempt - 1);
+        await this.sleep(waitMs);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private isRetryableMilvusInsertError(message: string): boolean {
+    const msg = message.toLowerCase();
+    return (
+      msg.includes("rst_stream") ||
+      msg.includes("protocol error") ||
+      msg.includes("unavailable") ||
+      msg.includes("deadline exceeded") ||
+      msg.includes("connection reset") ||
+      msg.includes("socket hang up") ||
+      msg.includes("econnreset") ||
+      msg.includes("code 13") ||
+      msg.includes("code 14")
+    );
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
   }
 
   private async findBook(bookId?: string, bookName?: string) {
