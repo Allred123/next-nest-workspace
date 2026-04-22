@@ -16,7 +16,7 @@ import { Book } from "./book/entities/book.entities";
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: ".env",
+      envFilePath: [".env.local", ".env"],
     }),
     AiModule,
     TypeOrmModule.forRootAsync({

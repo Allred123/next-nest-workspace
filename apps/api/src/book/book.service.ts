@@ -19,8 +19,8 @@ import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { EPubLoader } from "@langchain/community/document_loaders/fs/epub";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
-import { PromptTemplate } from "@langchain/core/prompts";
-import { StringOutputParser } from "@langchain/core/output_parsers";
+import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
+import { z } from "zod";
 import {
   MilvusClient,
   DataType,
@@ -75,6 +75,23 @@ type SearchRow = {
   score?: number;
 };
 
+type RetrievedDoc = {
+  question: string;
+  chapterNum: number | string;
+  index: number | string;
+  content: string;
+  score: number;
+};
+
+type RouteStrategy = "simple" | "complex";
+
+type EvaluationResult = {
+  enough: boolean;
+  missing: string[];
+  reason: string;
+  webQuery?: string;
+};
+
 type PersistedUploadFile = {
   persistedFilePath: string;
   parserFilePath: string;
@@ -103,6 +120,7 @@ export class BookService {
 
   constructor(
     @Inject("CHAT_MODEL") private readonly chatModel: ChatOpenAI,
+    @Inject("WEB_SEARCH_TOOL") private readonly webSearchTool: any,
     @Inject("BOOK_EMBEDDINGS_MODEL")
     private readonly embeddings: OpenAIEmbeddings,
     @InjectRepository(Book) private readonly bookRepo: Repository<Book>,
@@ -401,57 +419,258 @@ export class BookService {
     try {
       await this.milvusClient.connectPromise;
       await this.loadCollection(book.milvusCollection);
-
-      const queryVector = await this.embeddings.embedQuery(query);
-      const searchResult = await this.milvusClient.search({
-        collection_name: book.milvusCollection,
-        vector: queryVector,
-        limit: topK,
-        metric_type: MetricType.COSINE,
-        output_fields: ["chapter_num", "index", "content"],
+      const routeSchema = z.object({
+        strategy: z.enum(["simple", "complex"]),
+        reason: z.string().min(1),
+      });
+      const decomposeSchema = z.object({
+        subQuestions: z.array(z.string().min(1)).min(1).max(4),
+      });
+      const evaluateSchema = z.object({
+        enough: z.boolean(),
+        missing: z.array(z.string()).max(6),
+        reason: z.string().min(1),
+        webQuery: z.string().optional(),
       });
 
-      const rows = (searchResult.results ?? []) as SearchRow[];
-      if (!rows.length) {
-        const fallback = "No relevant content found in this book.";
-        if (sessionId) {
-          this.emitTtsChunk(sessionId, fallback);
-          this.emitTtsEnd(sessionId);
+      const GraphState = Annotation.Root({
+        question: Annotation,
+        k: Annotation,
+        strategy: Annotation,
+        routeReason: Annotation,
+        subQuestions: Annotation,
+        nextHop: Annotation,
+        retrievedDocs: Annotation,
+        localContext: Annotation,
+        evaluation: Annotation,
+        webContext: Annotation,
+        generation: Annotation,
+      });
+
+      const routeIntentNode = async (state: any) => {
+        const router = this.chatModel.withStructuredOutput(routeSchema);
+        const route = await router.invoke(
+          [
+            "你是 RAG 路由器。",
+            "请判断用户问题是 simple 还是 complex：",
+            "- simple: 常识问答、定义解释、无需书内证据。",
+            "- complex: 需要《当前书籍》具体情节/事实/证据，或多条件推理。",
+            "",
+            `问题：${state.question}`,
+          ].join("\n"),
+        );
+        return {
+          strategy: route.strategy as RouteStrategy,
+          routeReason: route.reason,
+          subQuestions: [],
+          nextHop: 0,
+          retrievedDocs: [],
+          localContext: "",
+          evaluation: undefined,
+          webContext: "",
+          generation: "",
+        };
+      };
+
+      const directAnswerNode = async (state: any) => {
+        const response = await this.chatModel.invoke(
+          [
+            "你是中文问答助手。",
+            "这是简单问题，直接回答即可；若不确定请明确说明。",
+            "",
+            `问题：${state.question}`,
+          ].join("\n"),
+        );
+        return { generation: this.extractModelText(response) };
+      };
+
+      const decomposeQuestionNode = async (state: any) => {
+        const planner = this.chatModel.withStructuredOutput(decomposeSchema);
+        const plan = await planner.invoke(
+          [
+            "把复杂问题拆成 1-4 个可检索子问题，按回答顺序返回数组。",
+            "要求：",
+            "1) 子问题具体、可检索。",
+            "2) 避免重复。",
+            "3) 保留原问题关键约束。",
+            "",
+            `原问题：${state.question}`,
+          ].join("\n"),
+        );
+        return {
+          subQuestions:
+            plan.subQuestions?.filter((item) => item.trim()).slice(0, 4) ??
+            [state.question],
+          nextHop: 0,
+        };
+      };
+
+      const retrieveHopNode = async (state: any) => {
+        const subQuestions = Array.isArray(state.subQuestions) && state.subQuestions.length
+          ? (state.subQuestions as string[])
+          : [state.question as string];
+        const hop = Number(state.nextHop ?? 0);
+        const currentQuestion = subQuestions[hop] ?? state.question;
+        const rows = await this.searchBookCollection(
+          book.milvusCollection,
+          currentQuestion,
+          state.k as number,
+        );
+        const mergedDocs = this.mergeRetrievedDocs(
+          (state.retrievedDocs ?? []) as RetrievedDoc[],
+          rows,
+          currentQuestion,
+        );
+        return {
+          retrievedDocs: mergedDocs,
+          localContext: this.buildLocalContext(mergedDocs),
+          nextHop: hop + 1,
+        };
+      };
+
+      const evaluateNode = async (state: any) => {
+        const evaluator = this.chatModel.withStructuredOutput(evaluateSchema);
+        const hasWeb = Boolean(state.webContext && String(state.webContext).trim());
+        const result = await evaluator.invoke(
+          [
+            "你是信息充分性评估器，请评估当前上下文是否足够回答问题。",
+            "",
+            `问题：${state.question}`,
+            "",
+            "本地检索上下文：",
+            state.localContext || "（空）",
+            "",
+            hasWeb ? "联网补充上下文：" : "",
+            hasWeb ? String(state.webContext) : "",
+            "",
+            "输出字段：",
+            "- enough: boolean",
+            "- missing: 缺失信息点数组（最多 6 条）",
+            "- reason: 简短原因",
+            "- webQuery: 若不足，给出一个适合联网搜索的查询",
+          ].join("\n"),
+        );
+        return {
+          evaluation: {
+            enough: result.enough,
+            missing: result.missing ?? [],
+            reason: result.reason,
+            webQuery: result.webQuery,
+          } as EvaluationResult,
+        };
+      };
+
+      const webSearchNode = async (state: any) => {
+        const webQuery =
+          state.evaluation?.webQuery?.trim() || (state.question as string);
+        let webContext = "";
+        try {
+          const result = await this.webSearchTool.invoke({
+            query: webQuery,
+            count: 8,
+          });
+          webContext =
+            typeof result === "string"
+              ? result
+              : JSON.stringify(result, null, 2);
+        } catch (error) {
+          webContext = `web search failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
         }
-        yield fallback;
-        return;
-      }
+        return { webContext };
+      };
 
-      const context = rows
-        .map(
-          (item, i) =>
-            `[Chunk ${i + 1}] Chapter ${item.chapter_num ?? "N/A"}: ${item.content ?? ""}`,
-        )
-        .join("\n\n");
+      const generateNode = async (state: any) => {
+        const context = [state.localContext, state.webContext]
+          .filter((item) => typeof item === "string" && item.trim())
+          .join("\n\n===== 联网补充 =====\n\n");
+        const response = await this.chatModel.invoke(
+          [
+            "你是严谨的中文书籍问答助手。",
+            "优先依据上下文作答，不要编造；若证据不足请明确说明不确定。",
+            "",
+            "上下文：",
+            context || "（空）",
+            "",
+            `问题：${state.question}`,
+            "",
+            "回答要求：",
+            "1) 先给结论，再给关键依据。",
+            "2) 若使用联网结果，请标注 URL 或引用编号。",
+            "3) 无法确认时明确说明缺失点。",
+          ].join("\n"),
+        );
+        return { generation: this.extractModelText(response) };
+      };
 
-      const prompt = PromptTemplate.fromTemplate(
-        [
-          "You are a book assistant. Answer strictly based on the provided context.",
-          "If context does not contain the answer, explicitly say you do not know.",
-          "",
-          "Context:",
-          "{context}",
-          "",
-          "Question: {query}",
-          "",
-          "Answer:",
-        ].join("\n"),
-      );
-      const chain = prompt.pipe(this.chatModel).pipe(new StringOutputParser());
-      const stream = await chain.stream({ query, context });
+      const afterRoute = (state: any) =>
+        state.strategy === "simple" ? "direct_answer" : "decompose_question";
+      const afterRetrieve = (state: any) => {
+        const subQuestions = Array.isArray(state.subQuestions)
+          ? (state.subQuestions as string[])
+          : [];
+        return Number(state.nextHop ?? 0) < subQuestions.length
+          ? "retrieve_hop"
+          : "evaluate_context";
+      };
+      const afterEvaluate = (state: any) => {
+        const enough = Boolean(state.evaluation?.enough);
+        if (enough) return "generate_answer";
+        if (String(state.webContext ?? "").trim()) return "generate_answer";
+        return "web_search";
+      };
 
-      for await (const chunk of stream) {
+      const graph = new StateGraph(GraphState)
+        .addNode("route_intent", routeIntentNode)
+        .addNode("direct_answer", directAnswerNode)
+        .addNode("decompose_question", decomposeQuestionNode)
+        .addNode("retrieve_hop", retrieveHopNode)
+        .addNode("evaluate_context", evaluateNode)
+        .addNode("web_search", webSearchNode)
+        .addNode("generate_answer", generateNode)
+        .addEdge(START, "route_intent")
+        .addConditionalEdges("route_intent", afterRoute, {
+          direct_answer: "direct_answer",
+          decompose_question: "decompose_question",
+        })
+        .addEdge("decompose_question", "retrieve_hop")
+        .addConditionalEdges("retrieve_hop", afterRetrieve, {
+          retrieve_hop: "retrieve_hop",
+          evaluate_context: "evaluate_context",
+        })
+        .addConditionalEdges("evaluate_context", afterEvaluate, {
+          generate_answer: "generate_answer",
+          web_search: "web_search",
+        })
+        .addEdge("web_search", "evaluate_context")
+        .addEdge("direct_answer", END)
+        .addEdge("generate_answer", END)
+        .compile();
+
+      const result = await graph.invoke({
+        question: query,
+        k: topK,
+        strategy: "complex",
+        routeReason: "",
+        subQuestions: [],
+        nextHop: 0,
+        retrievedDocs: [],
+        localContext: "",
+        evaluation: undefined,
+        webContext: "",
+        generation: "",
+      });
+
+      const answer =
+        String(result.generation ?? "").trim() ||
+        "抱歉，我暂时无法生成有效答案。";
+      for (const chunk of this.chunkText(answer, 48)) {
         if (sessionId) {
           this.emitTtsChunk(sessionId, chunk);
         }
         yield chunk;
       }
-
       if (sessionId) {
         this.emitTtsEnd(sessionId);
       }
@@ -464,6 +683,90 @@ export class BookService {
       }
       throw error;
     }
+  }
+
+  private async searchBookCollection(
+    collectionName: string,
+    query: string,
+    topK: number,
+  ): Promise<SearchRow[]> {
+    const queryVector = await this.embeddings.embedQuery(query);
+    const searchResult = await this.milvusClient.search({
+      collection_name: collectionName,
+      vector: queryVector,
+      limit: topK,
+      metric_type: MetricType.COSINE,
+      output_fields: ["chapter_num", "index", "content"],
+    });
+    return (searchResult.results ?? []) as SearchRow[];
+  }
+
+  private mergeRetrievedDocs(
+    existing: RetrievedDoc[],
+    rows: SearchRow[],
+    question: string,
+  ): RetrievedDoc[] {
+    const dedup = new Map<string, RetrievedDoc>();
+    for (const item of existing) {
+      dedup.set(
+        `${item.chapterNum}::${item.index}::${item.content.slice(0, 120)}`,
+        item,
+      );
+    }
+
+    for (const row of rows) {
+      const content = (row.content ?? "").trim();
+      if (!content) continue;
+      const doc: RetrievedDoc = {
+        question,
+        chapterNum: row.chapter_num ?? "N/A",
+        index: row.index ?? "N/A",
+        content,
+        score: Number(row.score ?? 0),
+      };
+      const key = `${doc.chapterNum}::${doc.index}::${doc.content.slice(0, 120)}`;
+      if (!dedup.has(key)) {
+        dedup.set(key, doc);
+      }
+    }
+    return [...dedup.values()];
+  }
+
+  private buildLocalContext(docs: RetrievedDoc[]): string {
+    if (!docs.length) return "";
+    return docs
+      .map(
+        (doc, idx) =>
+          `[Chunk ${idx + 1}] 子问题: ${doc.question}\nChapter ${doc.chapterNum}, Index ${doc.index}, Score ${doc.score.toFixed(4)}\n${doc.content}`,
+      )
+      .join("\n\n");
+  }
+
+  private extractModelText(response: unknown): string {
+    if (!response || typeof response !== "object") return "";
+    const content = (response as { content?: unknown }).content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content
+        .map((item) => {
+          if (!item || typeof item !== "object") return "";
+          const text = (item as { text?: unknown }).text;
+          return typeof text === "string" ? text : "";
+        })
+        .join("");
+    }
+    return "";
+  }
+
+  private chunkText(text: string, maxLength: number): string[] {
+    if (!text.trim()) return [];
+    const chunks: string[] = [];
+    let cursor = 0;
+    while (cursor < text.length) {
+      chunks.push(text.slice(cursor, cursor + maxLength));
+      cursor += maxLength;
+    }
+    return chunks;
   }
 
   private async findBook(bookId?: string, bookName?: string) {
