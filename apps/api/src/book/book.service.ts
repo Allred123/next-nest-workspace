@@ -173,6 +173,10 @@ export class BookService {
         this.configService.get<string>("MILVUS_ADDRESS") ?? "localhost:19530",
       token: milvusToken || undefined,
     });
+    void this.milvusClient.connectPromise.catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`[milvus connect failed] ${message}`);
+    });
     this.storageDriver = (
       this.configService.get<string>("STORAGE_DRIVER") ?? "local"
     ).toLowerCase() as StorageDriver;
