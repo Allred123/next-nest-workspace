@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { InjectRepository } from "@nestjs/typeorm";
@@ -206,7 +207,7 @@ export class BookService {
     });
     void this.milvusClient.connectPromise.catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`[milvus connect failed] ${message}`);
+      this.logger.error(`[Milvus 连接失败] ${message}`);
     });
     this.storageDriver = (
       this.configService.get<string>("STORAGE_DRIVER") ?? "local"
@@ -253,7 +254,7 @@ export class BookService {
       });
     } else if (this.storageDriver !== "local") {
       throw new Error(
-        `Unsupported STORAGE_DRIVER "${this.storageDriver}". Use "local" or "s3".`,
+        `不支持的 STORAGE_DRIVER "${this.storageDriver}"，请使用 "local" 或 "s3"。`,
       );
     }
   }
@@ -280,14 +281,14 @@ export class BookService {
       input.bookName?.trim() || parse(originalFileName).name;
 
     if (!sourceBookName) {
-      throw new BadRequestException("bookName is required");
+      throw new BadRequestException("bookName 不能为空");
     }
     const fileExt = (extname(originalFileName) || "").toLowerCase();
     const extAllowed = fileExt === ".epub" || fileExt === ".txt";
     const mimeAllowed = ALLOWED_MIME_TYPES.includes(file.mimetype);
     if (!extAllowed && !mimeAllowed) {
       throw new BadRequestException(
-        "Unsupported file type. Please upload .epub or .txt file.",
+        "不支持的文件类型，请上传 .epub 或 .txt 文件。",
       );
     }
 
@@ -304,7 +305,7 @@ export class BookService {
     );
     if (existing) {
       throw new BadRequestException(
-        `Book already exists: ${existing.bookName}`,
+        `书籍已存在：${existing.bookName}`,
       );
     }
 
@@ -437,7 +438,7 @@ export class BookService {
     const topK = input.k && input.k > 0 ? input.k : DEFAULT_TOP_K;
     const sessionId = input.ttsSessionId?.trim();
     if (!query) {
-      const text = "query is required";
+      const text = "query 不能为空";
       if (sessionId) {
         this.emitTtsError(sessionId, text);
       }
@@ -447,7 +448,7 @@ export class BookService {
 
     const book = await this.findBook(input.bookId, input.bookName);
     if (!book) {
-      const text = "book not found in mysql table";
+      const text = "未在 MySQL 中找到对应书籍";
       if (sessionId) {
         this.emitTtsError(sessionId, text);
       }
@@ -612,7 +613,7 @@ export class BookService {
               ? result
               : JSON.stringify(result, null, 2);
         } catch (error) {
-          webContext = `web search failed: ${
+          webContext = `联网搜索失败：${
             error instanceof Error ? error.message : String(error)
           }`;
         }
@@ -828,6 +829,16 @@ export class BookService {
       } catch (error) {
         lastError = error;
         const message = error instanceof Error ? error.message : String(error);
+        if (this.isMilvusConnectionDroppedError(message)) {
+          throw new ServiceUnavailableException(
+            "Milvus 连接已断开，请稍后重试。",
+          );
+        }
+        if (this.isMilvusUnavailableError(message)) {
+          throw new ServiceUnavailableException(
+            "Milvus 当前不可用，请稍后重试。",
+          );
+        }
         const canRetry =
           attempt < maxAttempts && this.isRetryableMilvusInsertError(message);
         this.logger.warn(
@@ -856,6 +867,19 @@ export class BookService {
       msg.includes("econnreset") ||
       msg.includes("code 13") ||
       msg.includes("code 14")
+    );
+  }
+
+  private isMilvusUnavailableError(message: string): boolean {
+    const msg = message.toLowerCase();
+    return msg.includes("unavailable");
+  }
+
+  private isMilvusConnectionDroppedError(message: string): boolean {
+    const msg = message.toLowerCase();
+    return (
+      msg.includes("connection dropped") ||
+      msg.includes("no connection established")
     );
   }
 
@@ -1062,7 +1086,7 @@ export class BookService {
       return await Promise.race([promise, timeoutPromise]);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`[saveBook failed] step=${label}, reason=${message}`);
+      this.logger.error(`[saveBook 失败] step=${label}, reason=${message}`);
       throw error;
     } finally {
       if (timer) clearTimeout(timer);

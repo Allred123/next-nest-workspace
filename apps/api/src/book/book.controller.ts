@@ -38,7 +38,7 @@ export class BookController {
     @Body('bookName') bookName?: string,
   ) {
     if (!file?.buffer?.length) {
-      throw new BadRequestException('Please upload book file in multipart field "file".');
+      throw new BadRequestException('请通过 multipart 字段 "file" 上传书籍文件。');
     }
     return this.bookService.saveBook({
       file,
