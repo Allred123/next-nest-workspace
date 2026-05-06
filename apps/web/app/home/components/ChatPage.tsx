@@ -216,12 +216,21 @@ export function ChatPage({
     const audioEl = audioRef.current;
 
     if (!sourceBuffer || !mediaSource) return;
+    if (mediaSource.readyState !== "open") return;
+    if (audioEl?.error) return;
     if (sourceBuffer.updating) return;
 
     if (ttsPendingBuffersRef.current.length > 0) {
       const next = ttsPendingBuffersRef.current.shift();
       if (next) {
-        sourceBuffer.appendBuffer(next);
+        try {
+          sourceBuffer.appendBuffer(next);
+        } catch {
+          // SourceBuffer can become unusable after media element errors.
+          // Skip this chunk to avoid a hard failure loop.
+          flushTtsBufferQueue();
+          return;
+        }
         if (audioEl && !ttsUserPausedRef.current) {
           void audioEl.play().catch(() => {
             // Browser autoplay policy may block playback.

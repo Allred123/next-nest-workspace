@@ -1,4 +1,4 @@
-import {
+﻿import {
   BadRequestException,
   Inject,
   Injectable,
@@ -12,12 +12,10 @@ import { InjectRepository } from "@nestjs/typeorm";
 import { EventEmitter2 } from "@nestjs/event-emitter";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { extname, join, parse } from "node:path";
-import type { Express } from "express";
-import { pinyin } from "pinyin-pro";
 import { Repository } from "typeorm";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { Client as ElasticsearchClient } from "@elastic/elasticsearch";
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { EPubLoader } from "@langchain/community/document_loaders/fs/epub";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
@@ -34,82 +32,51 @@ import {
   type AiTtsStreamEvent,
 } from "../common/stream-events";
 import { Book } from "./entities/book.entities";
+import {
+  ALLOWED_MIME_TYPES,
+  BOOK_UPLOAD_DIR,
+  DEFAULT_CHUNK_OVERLAP,
+  DEFAULT_CHUNK_SIZE,
+  DEFAULT_TOP_K,
+  DEFAULT_VECTOR_DIM,
+  EMBEDDING_BATCH_SIZE,
+  LOCAL_TEMP_BOOK_DIR,
+  MILVUS_INSERT_BATCH_SIZE,
+  MILVUS_INSERT_RETRY_BACKOFF_MS,
+  MILVUS_INSERT_RETRY_MAX,
+  MILVUS_INSERT_RPC_TIMEOUT_MS,
+  SAVE_TIMEOUT_EMBED_CHAPTER_MS,
+  SAVE_TIMEOUT_LOAD_DOCUMENTS_MS,
+  SAVE_TIMEOUT_MILVUS_CONNECT_MS,
+  SAVE_TIMEOUT_MILVUS_ENSURE_COLLECTION_MS,
+  SAVE_TIMEOUT_MILVUS_INSERT_CHAPTER_MS,
+  SAVE_TIMEOUT_MYSQL_FIND_MS,
+  SAVE_TIMEOUT_MYSQL_SAVE_MS,
+  SAVE_TIMEOUT_PERSIST_FILE_MS,
+} from "./book.constants";
+import {
+  MilvusInsertRow,
+  PersistedUploadFile,
+  ReadInput,
+  RetrievedDoc,
+  RouteStrategy,
+  SaveBookRequest,
+  SearchRow,
+  StorageDriver,
+} from "./book.types";
+import { chunkText, extractModelText, toPinyinSlug } from "./book.utils";
+import {
+  buildHybridRetrievalQueries,
+  formatHybridContext,
+  mergeHybridDocs,
+  recallEsDocuments,
+  recallMilvusDocuments,
+  rerankHybridDocs,
+} from "./book.hybrid";
 
-const DEFAULT_VECTOR_DIM = 1024;
-const DEFAULT_CHUNK_SIZE = 500;
-const DEFAULT_CHUNK_OVERLAP = 50;
-const DEFAULT_TOP_K = 5;
-const EMBEDDING_BATCH_SIZE = 10;
-const SAVE_TIMEOUT_MYSQL_FIND_MS = 30_000;
-const SAVE_TIMEOUT_PERSIST_FILE_MS = 60_000;
-const SAVE_TIMEOUT_MILVUS_CONNECT_MS = 45_000;
-const SAVE_TIMEOUT_MILVUS_ENSURE_COLLECTION_MS = 120_000;
-const SAVE_TIMEOUT_LOAD_DOCUMENTS_MS = 120_000;
-const SAVE_TIMEOUT_EMBED_CHAPTER_MS = 180_000;
-const SAVE_TIMEOUT_MILVUS_INSERT_CHAPTER_MS = 300_000;
-const SAVE_TIMEOUT_MYSQL_SAVE_MS = 30_000;
-const MILVUS_INSERT_BATCH_SIZE = 20;
-const MILVUS_INSERT_RPC_TIMEOUT_MS = 30_000;
-const MILVUS_INSERT_RETRY_MAX = 3;
-const MILVUS_INSERT_RETRY_BACKOFF_MS = 1_000;
-const ALLOWED_MIME_TYPES = ["text/plain", "application/epub+zip"];
-const BOOK_UPLOAD_DIR = join(process.cwd(), "storage", "books");
-const LOCAL_TEMP_BOOK_DIR = join(tmpdir(), "new-ai-agent-books");
-
-type StorageDriver = "local" | "s3";
-
-type ReadInput = {
-  query: string;
-  bookId?: string;
-  bookName?: string;
-  k?: number;
-  ttsSessionId?: string;
-};
-
-export type SaveBookRequest = {
-  file: Express.Multer.File;
-  bookName?: string;
-  chunkSize?: number;
-  chunkOverlap?: number;
-};
-
-type SearchRow = {
-  chapter_num?: number;
-  index?: number;
-  content?: string;
-  score?: number;
-};
-
-type RetrievedDoc = {
-  question: string;
-  chapterNum: number | string;
-  index: number | string;
-  content: string;
-  score: number;
-};
-
-type RouteStrategy = "simple" | "complex";
-
-type EvaluationResult = {
-  enough: boolean;
-  missing: string[];
-  reason: string;
-  webQuery?: string;
-};
-
-type MilvusInsertRow = {
-  id: string;
-  chapter_num: number;
-  index: number;
-  content: string;
-  vector: number[];
-};
-
-type PersistedUploadFile = {
-  persistedFilePath: string;
-  parserFilePath: string;
-  cleanup?: () => Promise<void>;
-};
+const HYBRID_ES_K = 15;
+const HYBRID_MILVUS_K = 15;
+const HYBRID_RERANK_TOP_N = 3;
 
 @Injectable()
 export class BookService {
@@ -128,6 +95,11 @@ export class BookService {
   private readonly milvusInsertRetryMax: number;
   private readonly milvusInsertRetryBackoffMs: number;
   private readonly milvusClient: MilvusClient;
+  private readonly esClient?: ElasticsearchClient;
+  private readonly esIndexName?: string;
+  private readonly rerankApiKey?: string;
+  private readonly rerankModel: string;
+  private readonly rerankBaseUrl: string;
   private readonly storageDriver: StorageDriver;
   private readonly s3Client?: S3Client;
   private readonly s3Bucket?: string;
@@ -136,7 +108,6 @@ export class BookService {
 
   constructor(
     @Inject("CHAT_MODEL") private readonly chatModel: ChatOpenAI,
-    @Inject("WEB_SEARCH_TOOL") private readonly webSearchTool: any,
     @Inject("BOOK_EMBEDDINGS_MODEL")
     private readonly embeddings: OpenAIEmbeddings,
     @InjectRepository(Book) private readonly bookRepo: Repository<Book>,
@@ -206,9 +177,22 @@ export class BookService {
       token: milvusToken || undefined,
       ssl: milvusSsl,
     });
+    const esNode =
+      this.configService.get<string>("ES_NODE")?.trim() ||
+      "http://localhost:9200";
+    this.esIndexName = this.configService.get<string>("ES_INDEX")?.trim();
+    this.esClient = new ElasticsearchClient({ node: esNode });
+    this.rerankApiKey =
+      this.configService.get<string>("RERANK_API_KEY")?.trim() ||
+      this.configService.get<string>("OPENAI_API_KEY")?.trim();
+    this.rerankModel =
+      this.configService.get<string>("RERANK_MODEL")?.trim() || "qwen3-rerank";
+    this.rerankBaseUrl =
+      this.configService.get<string>("RERANK_BASE_URL")?.trim() ||
+      "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank";
     void this.milvusClient.connectPromise.catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`[Milvus 连接失败] ${message}`);
+      this.logger.error(`[Milvus connect failed] ${message}`);
     });
     this.storageDriver = (
       this.configService.get<string>("STORAGE_DRIVER") ?? "local"
@@ -255,7 +239,7 @@ export class BookService {
       });
     } else if (this.storageDriver !== "local") {
       throw new Error(
-        `不支持的 STORAGE_DRIVER "${this.storageDriver}"，请使用 "local" 或 "s3"。`,
+        `Unsupported STORAGE_DRIVER "${this.storageDriver}", please use "local" or "s3".`,
       );
     }
   }
@@ -282,18 +266,18 @@ export class BookService {
       input.bookName?.trim() || parse(originalFileName).name;
 
     if (!sourceBookName) {
-      throw new BadRequestException("bookName 不能为空");
+      throw new BadRequestException("bookName cannot be empty");
     }
     const fileExt = (extname(originalFileName) || "").toLowerCase();
     const extAllowed = fileExt === ".epub" || fileExt === ".txt";
     const mimeAllowed = ALLOWED_MIME_TYPES.includes(file.mimetype);
     if (!extAllowed && !mimeAllowed) {
       throw new BadRequestException(
-        "不支持的文件类型，请上传 .epub 或 .txt 文件。",
+        "Unsupported file type. Please upload an .epub or .txt file.",
       );
     }
 
-    const bookNamePinyin = this.toPinyinSlug(sourceBookName);
+    const bookNamePinyin = toPinyinSlug(sourceBookName);
     const milvusCollection = bookNamePinyin;
 
     this.logger.log(`saveBook start: bookNamePinyin=${bookNamePinyin}`);
@@ -306,7 +290,7 @@ export class BookService {
     );
     if (existing) {
       throw new BadRequestException(
-        `书籍已存在：${existing.bookName}`,
+        `Book already exists: ${existing.bookName}`,
       );
     }
 
@@ -365,53 +349,13 @@ export class BookService {
         await uploadedFile.cleanup();
       }
     }
-    const splitter = new RecursiveCharacterTextSplitter({
+    const totalChunks = await this.indexDocumentsToMilvus({
+      documents,
       chunkSize,
       chunkOverlap,
+      bookNamePinyin,
+      milvusCollection,
     });
-
-    let totalChunks = 0;
-    for (
-      let chapterIndex = 0;
-      chapterIndex < documents.length;
-      chapterIndex += 1
-    ) {
-      const chapter = documents[chapterIndex];
-      const chunks = await splitter.splitText(chapter.pageContent);
-      if (!chunks.length) continue;
-
-      const vectors = await this.withTimeout(
-        this.embedDocumentsInBatches(chunks),
-        `embed-documents-chapter-${chapterIndex + 1}`,
-        this.saveTimeoutEmbedChapterMs,
-      );
-      const now = Date.now();
-      const data: MilvusInsertRow[] = chunks.map((content, idx) => ({
-        id: `${bookNamePinyin}_${chapterIndex + 1}_${idx}_${now}`,
-        chapter_num: chapterIndex + 1,
-        index: idx,
-        content: content.slice(0, 10000),
-        vector: vectors[idx],
-      }));
-
-      let chapterInserted = 0;
-      for (let offset = 0; offset < data.length; offset += this.milvusInsertBatchSize) {
-        const batch = data.slice(offset, offset + this.milvusInsertBatchSize);
-        const batchNo = Math.floor(offset / this.milvusInsertBatchSize) + 1;
-        const result = await this.withTimeout(
-          this.insertBatchWithRetry(
-            milvusCollection,
-            batch,
-            chapterIndex + 1,
-            batchNo,
-          ),
-          `milvus-insert-chapter-${chapterIndex + 1}-batch-${batchNo}`,
-          this.saveTimeoutMilvusInsertChapterMs,
-        );
-        chapterInserted += Number(result.insert_cnt ?? batch.length);
-      }
-      totalChunks += chapterInserted;
-    }
 
     const savedBook = await this.withTimeout(
       this.bookRepo.save(entity),
@@ -439,7 +383,7 @@ export class BookService {
     const topK = input.k && input.k > 0 ? input.k : DEFAULT_TOP_K;
     const sessionId = input.ttsSessionId?.trim();
     if (!query) {
-      const text = "query 不能为空";
+      const text = "query cannot be empty";
       if (sessionId) {
         this.emitTtsError(sessionId, text);
       }
@@ -449,7 +393,7 @@ export class BookService {
 
     const book = await this.findBook(input.bookId, input.bookName);
     if (!book) {
-      const text = "未在 MySQL 中找到对应书籍";
+      const text = "Book not found in MySQL.";
       if (sessionId) {
         this.emitTtsError(sessionId, text);
       }
@@ -459,31 +403,24 @@ export class BookService {
     try {
       await this.milvusClient.connectPromise;
       await this.loadCollection(book.milvusCollection);
+
       const routeSchema = z.object({
         strategy: z.enum(["simple", "complex"]),
         reason: z.string().min(1),
       });
-      const decomposeSchema = z.object({
-        subQuestions: z.array(z.string().min(1)).min(1).max(4),
-      });
-      const evaluateSchema = z.object({
-        enough: z.boolean(),
-        missing: z.array(z.string()).max(6),
-        reason: z.string().min(1),
-        webQuery: z.string().optional(),
+      const queryAugmentSchema = z.object({
+        queries: z.array(z.string().min(1)).min(1).max(3),
       });
 
       const GraphState = Annotation.Root({
         question: Annotation,
-        k: Annotation,
         strategy: Annotation,
         routeReason: Annotation,
-        subQuestions: Annotation,
-        nextHop: Annotation,
-        retrievedDocs: Annotation,
-        localContext: Annotation,
-        evaluation: Annotation,
-        webContext: Annotation,
+        queryAugmentation: Annotation,
+        esHits: Annotation,
+        milvusHits: Annotation,
+        merged: Annotation,
+        topDocuments: Annotation,
         generation: Annotation,
       });
 
@@ -492,22 +429,23 @@ export class BookService {
         const route = await router.invoke(
           [
             "你是 RAG 路由器。",
-            "请判断用户问题是 simple 还是 complex：",
+            "请判断用户问题是 simple 还是 complex。",
             "- simple: 常识问答、定义解释、无需书内证据。",
             "- complex: 需要《当前书籍》具体情节/事实/证据，或多条件推理。",
             "",
             `问题：${state.question}`,
           ].join("\n"),
         );
+        console.log("用户提出的问题是simple 还是 complex？", route);
+
         return {
           strategy: route.strategy as RouteStrategy,
           routeReason: route.reason,
-          subQuestions: [],
-          nextHop: 0,
-          retrievedDocs: [],
-          localContext: "",
-          evaluation: undefined,
-          webContext: "",
+          queryAugmentation: { queries: [] },
+          esHits: [],
+          milvusHits: [],
+          merged: [],
+          topDocuments: [],
           generation: "",
         };
       };
@@ -521,191 +459,129 @@ export class BookService {
             `问题：${state.question}`,
           ].join("\n"),
         );
-        return { generation: this.extractModelText(response) };
+        return { generation: extractModelText(response) };
       };
 
-      const decomposeQuestionNode = async (state: any) => {
-        const planner = this.chatModel.withStructuredOutput(decomposeSchema);
-        const plan = await planner.invoke(
+      const queryAugmentNode = async (state: any) => {
+        const planner = this.chatModel.withStructuredOutput(queryAugmentSchema);
+        const result = await planner.invoke(
           [
-            "把复杂问题拆成 1-4 个可检索子问题，按回答顺序返回数组。",
-            "要求：",
-            "1) 子问题具体、可检索。",
-            "2) 避免重复。",
-            "3) 保留原问题关键约束。",
+            "你是检索问题重写器。",
+            "请基于用户问题生成 1-3 条不同角度、可直接用于检索的问句。",
+            "要求：每条都具体、避免重复、保留关键约束。",
             "",
             `原问题：${state.question}`,
           ].join("\n"),
         );
-        return {
-          subQuestions:
-            plan.subQuestions?.filter((item) => item.trim()).slice(0, 4) ??
-            [state.question],
-          nextHop: 0,
-        };
+        const queries = (result.queries ?? [])
+          .map((item) => item.trim())
+          .filter(Boolean)
+          .slice(0, 3);
+        return { queryAugmentation: { queries } };
       };
 
-      const retrieveHopNode = async (state: any) => {
-        const subQuestions = Array.isArray(state.subQuestions) && state.subQuestions.length
-          ? (state.subQuestions as string[])
-          : [state.question as string];
-        const hop = Number(state.nextHop ?? 0);
-        const currentQuestion = subQuestions[hop] ?? state.question;
-        const rows = await this.searchBookCollection(
-          book.milvusCollection,
-          currentQuestion,
-          state.k as number,
+      const esRecallNode = async (state: any) => {
+        const queries = buildHybridRetrievalQueries(
+          state.question as string,
+          state.queryAugmentation as { queries?: string[] },
         );
-        const mergedDocs = this.mergeRetrievedDocs(
-          (state.retrievedDocs ?? []) as RetrievedDoc[],
-          rows,
-          currentQuestion,
-        );
-        return {
-          retrievedDocs: mergedDocs,
-          localContext: this.buildLocalContext(mergedDocs),
-          nextHop: hop + 1,
-        };
+        const esHits = this.esClient
+          ? await recallEsDocuments({
+              esClient: this.esClient,
+              indexName: this.getEsIndexName(book.milvusCollection),
+              queries,
+              totalK: HYBRID_ES_K,
+            })
+          : [];
+        return { esHits };
       };
 
-      const evaluateNode = async (state: any) => {
-        const evaluator = this.chatModel.withStructuredOutput(evaluateSchema);
-        const hasWeb = Boolean(state.webContext && String(state.webContext).trim());
-        const result = await evaluator.invoke(
-          [
-            "你是信息充分性评估器，请评估当前上下文是否足够回答问题。",
-            "",
-            `问题：${state.question}`,
-            "",
-            "本地检索上下文：",
-            state.localContext || "（空）",
-            "",
-            hasWeb ? "联网补充上下文：" : "",
-            hasWeb ? String(state.webContext) : "",
-            "",
-            "输出字段：",
-            "- enough: boolean",
-            "- missing: 缺失信息点数组（最多 6 条）",
-            "- reason: 简短原因",
-            "- webQuery: 若不足，给出一个适合联网搜索的查询",
-          ].join("\n"),
+      const milvusRecallNode = async (state: any) => {
+        const queries = buildHybridRetrievalQueries(
+          state.question as string,
+          state.queryAugmentation as { queries?: string[] },
         );
-        return {
-          evaluation: {
-            enough: result.enough,
-            missing: result.missing ?? [],
-            reason: result.reason,
-            webQuery: result.webQuery,
-          } as EvaluationResult,
-        };
+        const milvusHits = await recallMilvusDocuments({
+          collectionName: book.milvusCollection,
+          queries,
+          totalK: HYBRID_MILVUS_K,
+          searchFn: (collection, q, limit) =>
+            this.searchBookCollection(collection, q, limit),
+        });
+        return { milvusHits };
       };
 
-      const webSearchNode = async (state: any) => {
-        const webQuery =
-          state.evaluation?.webQuery?.trim() || (state.question as string);
-        let webContext = "";
-        try {
-          const result = await this.webSearchTool.invoke({
-            query: webQuery,
-            count: 8,
-          });
-          webContext =
-            typeof result === "string"
-              ? result
-              : JSON.stringify(result, null, 2);
-        } catch (error) {
-          webContext = `联网搜索失败：${
-            error instanceof Error ? error.message : String(error)
-          }`;
-        }
-        return { webContext };
+      const mergeNode = async (state: any) => {
+        const merged = mergeHybridDocs(
+          (state.esHits ?? []) as RetrievedDoc[],
+          (state.milvusHits ?? []) as RetrievedDoc[],
+        );
+        return { merged };
+      };
+
+      const rerankNode = async (state: any) => {
+        const topDocuments = await rerankHybridDocs({
+          query: state.question as string,
+          docs: (state.merged ?? []) as RetrievedDoc[],
+          topN: Math.max(HYBRID_RERANK_TOP_N, topK),
+          rerankApiKey: this.rerankApiKey,
+          rerankModel: this.rerankModel,
+          rerankBaseUrl: this.rerankBaseUrl,
+          onWarn: (message) => this.logger.warn(`[rerank fallback] ${message}`),
+        });
+        return { topDocuments };
       };
 
       const generateNode = async (state: any) => {
-        const context = [state.localContext, state.webContext]
-          .filter((item) => typeof item === "string" && item.trim())
-          .join("\n\n===== 联网补充 =====\n\n");
-        const response = await this.chatModel.invoke(
-          [
-            "你是严谨的中文书籍问答助手。",
-            "优先依据上下文作答，不要编造；若证据不足请明确说明不确定。",
-            "",
-            "上下文：",
-            context || "（空）",
-            "",
-            `问题：${state.question}`,
-            "",
-            "回答要求：",
-            "1) 先给结论，再给关键依据。",
-            "2) 若使用联网结果，请标注 URL 或引用编号。",
-            "3) 无法确认时明确说明缺失点。",
-          ].join("\n"),
+        const generation = await this.generateAnswerByDocs(
+          state.question as string,
+          (state.topDocuments ?? []) as RetrievedDoc[],
         );
-        return { generation: this.extractModelText(response) };
+        return { generation };
       };
 
       const afterRoute = (state: any) =>
-        state.strategy === "simple" ? "direct_answer" : "decompose_question";
-      const afterRetrieve = (state: any) => {
-        const subQuestions = Array.isArray(state.subQuestions)
-          ? (state.subQuestions as string[])
-          : [];
-        return Number(state.nextHop ?? 0) < subQuestions.length
-          ? "retrieve_hop"
-          : "evaluate_context";
-      };
-      const afterEvaluate = (state: any) => {
-        const enough = Boolean(state.evaluation?.enough);
-        if (enough) return "generate_answer";
-        if (String(state.webContext ?? "").trim()) return "generate_answer";
-        return "web_search";
-      };
+        state.strategy === "simple" ? "direct_answer" : "query_augment";
 
       const graph = new StateGraph(GraphState)
         .addNode("route_intent", routeIntentNode)
         .addNode("direct_answer", directAnswerNode)
-        .addNode("decompose_question", decomposeQuestionNode)
-        .addNode("retrieve_hop", retrieveHopNode)
-        .addNode("evaluate_context", evaluateNode)
-        .addNode("web_search", webSearchNode)
+        .addNode("query_augment", queryAugmentNode)
+        .addNode("es_recall", esRecallNode)
+        .addNode("milvus_recall", milvusRecallNode)
+        .addNode("merge_recall", mergeNode)
+        .addNode("rerank", rerankNode)
         .addNode("generate_answer", generateNode)
         .addEdge(START, "route_intent")
         .addConditionalEdges("route_intent", afterRoute, {
           direct_answer: "direct_answer",
-          decompose_question: "decompose_question",
+          query_augment: "query_augment",
         })
-        .addEdge("decompose_question", "retrieve_hop")
-        .addConditionalEdges("retrieve_hop", afterRetrieve, {
-          retrieve_hop: "retrieve_hop",
-          evaluate_context: "evaluate_context",
-        })
-        .addConditionalEdges("evaluate_context", afterEvaluate, {
-          generate_answer: "generate_answer",
-          web_search: "web_search",
-        })
-        .addEdge("web_search", "evaluate_context")
+        .addEdge("query_augment", "es_recall")
+        .addEdge("query_augment", "milvus_recall")
+        .addEdge(["es_recall", "milvus_recall"], "merge_recall")
+        .addEdge("merge_recall", "rerank")
+        .addEdge("rerank", "generate_answer")
         .addEdge("direct_answer", END)
         .addEdge("generate_answer", END)
         .compile();
 
       const result = await graph.invoke({
         question: query,
-        k: topK,
         strategy: "complex",
         routeReason: "",
-        subQuestions: [],
-        nextHop: 0,
-        retrievedDocs: [],
-        localContext: "",
-        evaluation: undefined,
-        webContext: "",
+        queryAugmentation: { queries: [] },
+        esHits: [],
+        milvusHits: [],
+        merged: [],
+        topDocuments: [],
         generation: "",
       });
 
       const answer =
         String(result.generation ?? "").trim() ||
         "抱歉，我暂时无法生成有效答案。";
-      for (const chunk of this.chunkText(answer, 48)) {
+      for (const chunk of chunkText(answer, 48)) {
         if (sessionId) {
           this.emitTtsChunk(sessionId, chunk);
         }
@@ -724,7 +600,6 @@ export class BookService {
       throw error;
     }
   }
-
   private async searchBookCollection(
     collectionName: string,
     query: string,
@@ -741,72 +616,30 @@ export class BookService {
     return (searchResult.results ?? []) as SearchRow[];
   }
 
-  private mergeRetrievedDocs(
-    existing: RetrievedDoc[],
-    rows: SearchRow[],
-    question: string,
-  ): RetrievedDoc[] {
-    const dedup = new Map<string, RetrievedDoc>();
-    for (const item of existing) {
-      dedup.set(
-        `${item.chapterNum}::${item.index}::${item.content.slice(0, 120)}`,
-        item,
-      );
-    }
-
-    for (const row of rows) {
-      const content = (row.content ?? "").trim();
-      if (!content) continue;
-      const doc: RetrievedDoc = {
-        question,
-        chapterNum: row.chapter_num ?? "N/A",
-        index: row.index ?? "N/A",
-        content,
-        score: Number(row.score ?? 0),
-      };
-      const key = `${doc.chapterNum}::${doc.index}::${doc.content.slice(0, 120)}`;
-      if (!dedup.has(key)) {
-        dedup.set(key, doc);
-      }
-    }
-    return [...dedup.values()];
+  private getEsIndexName(defaultName: string): string {
+    const fromConfig = this.esIndexName?.trim();
+    return fromConfig || defaultName;
   }
 
-  private buildLocalContext(docs: RetrievedDoc[]): string {
-    if (!docs.length) return "";
-    return docs
-      .map(
-        (doc, idx) =>
-          `[Chunk ${idx + 1}] 子问题: ${doc.question}\nChapter ${doc.chapterNum}, Index ${doc.index}, Score ${doc.score.toFixed(4)}\n${doc.content}`,
-      )
-      .join("\n\n");
-  }
-
-  private extractModelText(response: unknown): string {
-    if (!response || typeof response !== "object") return "";
-    const content = (response as { content?: unknown }).content;
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content
-        .map((item) => {
-          if (!item || typeof item !== "object") return "";
-          const text = (item as { text?: unknown }).text;
-          return typeof text === "string" ? text : "";
-        })
-        .join("");
-    }
-    return "";
-  }
-
-  private chunkText(text: string, maxLength: number): string[] {
-    if (!text.trim()) return [];
-    const chunks: string[] = [];
-    let cursor = 0;
-    while (cursor < text.length) {
-      chunks.push(text.slice(cursor, cursor + maxLength));
-      cursor += maxLength;
-    }
-    return chunks;
+  private async generateAnswerByDocs(
+    query: string,
+    docs: RetrievedDoc[],
+  ): Promise<string> {
+    const context = formatHybridContext(docs);
+    const response = await this.chatModel.invoke(
+      [
+        "你是严谨的中文书籍问答助手。",
+        "优先依据检索片段作答，不要编造；若证据不足请明确说明不确定。",
+        "",
+        `用户问题：${query}`,
+        "",
+        "检索片段：",
+        context || "（空）",
+        "",
+        "回答要求：先结论，再依据；简洁有条理。",
+      ].join("\n"),
+    );
+    return extractModelText(response).trim();
   }
 
   private async insertBatchWithRetry(
@@ -832,17 +665,17 @@ export class BookService {
         const message = error instanceof Error ? error.message : String(error);
         if (this.isMilvusConnectionDroppedError(message)) {
           throw new ServiceUnavailableException(
-            "Milvus 连接已断开，请稍后重试。",
+            "Milvus connection dropped, please retry later.",
           );
         }
         if (this.isMilvusDeadlineExceededError(message)) {
           throw new RequestTimeoutException(
-            "Milvus 写入超时，请稍后重试或减小单次上传文件大小。",
+            "Milvus write timed out, please retry later or reduce upload size.",
           );
         }
         if (this.isMilvusUnavailableError(message)) {
           throw new ServiceUnavailableException(
-            "Milvus 当前不可用，请稍后重试。",
+            "Milvus is currently unavailable, please retry later.",
           );
         }
         const canRetry =
@@ -853,7 +686,8 @@ export class BookService {
         if (!canRetry) {
           throw error;
         }
-        const waitMs = this.milvusInsertRetryBackoffMs * Math.pow(2, attempt - 1);
+        const waitMs =
+          this.milvusInsertRetryBackoffMs * Math.pow(2, attempt - 1);
         await this.sleep(waitMs);
       }
     }
@@ -909,20 +743,11 @@ export class BookService {
         where: { bookName: inputName },
       });
       if (byName) return byName;
-      const pinyinName = this.toPinyinSlug(inputName);
+      const pinyinName = toPinyinSlug(inputName);
       return this.bookRepo.findOne({ where: { bookNamePinyin: pinyinName } });
     }
 
     return null;
-  }
-
-  private toPinyinSlug(bookName: string) {
-    const base = pinyin(bookName, { toneType: "none" })
-      .toLowerCase()
-      .replace(/\s+/g, "")
-      .replace(/[^a-z0-9_]/g, "");
-    if (!base) return `book_${Date.now()}`;
-    return /^\d/.test(base) ? `b${base}` : base;
   }
 
   private async ensureCollection(collectionName: string) {
@@ -999,6 +824,127 @@ export class BookService {
       vectors.push(...batchVectors);
     }
     return vectors;
+  }
+
+  private async indexDocumentsToMilvus(input: {
+    documents: Array<{ pageContent: string }>;
+    chunkSize: number;
+    chunkOverlap: number;
+    bookNamePinyin: string;
+    milvusCollection: string;
+  }): Promise<number> {
+    const splitter = new RecursiveCharacterTextSplitter({
+      chunkSize: input.chunkSize,
+      chunkOverlap: input.chunkOverlap,
+    });
+
+    let totalChunks = 0;
+    for (
+      let chapterIndex = 0;
+      chapterIndex < input.documents.length;
+      chapterIndex += 1
+    ) {
+      const chapter = input.documents[chapterIndex];
+      const chunks = await splitter.splitText(chapter.pageContent);
+      if (!chunks.length) continue;
+
+      const vectors = await this.withTimeout(
+        this.embedDocumentsInBatches(chunks),
+        `embed-documents-chapter-${chapterIndex + 1}`,
+        this.saveTimeoutEmbedChapterMs,
+      );
+      const now = Date.now();
+      const data: MilvusInsertRow[] = chunks.map((content, idx) => ({
+        id: `${input.bookNamePinyin}_${chapterIndex + 1}_${idx}_${now}`,
+        chapter_num: chapterIndex + 1,
+        index: idx,
+        content: content.slice(0, 10000),
+        vector: vectors[idx],
+      }));
+
+      await this.indexChapterToEs(
+        this.getEsIndexName(input.milvusCollection),
+        input.bookNamePinyin,
+        chapterIndex + 1,
+        data,
+      );
+
+      totalChunks += await this.insertChapterBatches(
+        input.milvusCollection,
+        data,
+        chapterIndex + 1,
+      );
+    }
+
+    return totalChunks;
+  }
+
+  private async insertChapterBatches(
+    milvusCollection: string,
+    data: MilvusInsertRow[],
+    chapterNo: number,
+  ): Promise<number> {
+    let chapterInserted = 0;
+    for (
+      let offset = 0;
+      offset < data.length;
+      offset += this.milvusInsertBatchSize
+    ) {
+      const batch = data.slice(offset, offset + this.milvusInsertBatchSize);
+      const batchNo = Math.floor(offset / this.milvusInsertBatchSize) + 1;
+      const result = await this.withTimeout(
+        this.insertBatchWithRetry(milvusCollection, batch, chapterNo, batchNo),
+        `milvus-insert-chapter-${chapterNo}-batch-${batchNo}`,
+        this.saveTimeoutMilvusInsertChapterMs,
+      );
+      chapterInserted += Number(result.insert_cnt ?? batch.length);
+    }
+    return chapterInserted;
+  }
+
+  private async indexChapterToEs(
+    indexName: string,
+    bookNamePinyin: string,
+    chapterNo: number,
+    rows: MilvusInsertRow[],
+  ): Promise<void> {
+    if (!this.esClient || !rows.length) return;
+
+    const operations: Array<Record<string, unknown>> = [];
+    for (const row of rows) {
+      operations.push({
+        index: {
+          _index: indexName,
+          _id: row.id,
+        },
+      });
+      operations.push({
+        id: row.id,
+        note_title: `${bookNamePinyin} chapter ${chapterNo}`,
+        title: `${bookNamePinyin} chapter ${chapterNo}`,
+        content: row.content,
+        chapter_num: row.chapter_num,
+        chunk_index: row.index,
+        source: "book_upload",
+      });
+    }
+
+    const result = await this.esClient.bulk({
+      refresh: true,
+      operations,
+    });
+    if (result.errors) {
+      const firstError = result.items.find((item) => {
+        const action = (item.index ?? item.create ?? item.update) as
+          | { error?: { reason?: string; type?: string } }
+          | undefined;
+        return Boolean(action?.error);
+      });
+      const reason =
+        (firstError?.index as { error?: { reason?: string } } | undefined)
+          ?.error?.reason ?? "unknown bulk error";
+      throw new Error(`Elasticsearch bulk index failed: ${reason}`);
+    }
   }
 
   private async loadBookDocuments(
@@ -1089,7 +1035,9 @@ export class BookService {
     let timer: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        reject(new Error(`[saveBook timeout] step=${label}, timeoutMs=${timeoutMs}`));
+        reject(
+          new Error(`[saveBook timeout] step=${label}, timeoutMs=${timeoutMs}`),
+        );
       }, timeoutMs);
     });
 
@@ -1097,7 +1045,7 @@ export class BookService {
       return await Promise.race([promise, timeoutPromise]);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`[saveBook 失败] step=${label}, reason=${message}`);
+      this.logger.error(`[saveBook failed] step=${label}, reason=${message}`);
       throw error;
     } finally {
       if (timer) clearTimeout(timer);

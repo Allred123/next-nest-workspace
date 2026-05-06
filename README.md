@@ -1,257 +1,115 @@
 # AI Q&A Monorepo
 
-基于 `pnpm workspace` 的前后端分离 AI 问答项目，支持文本对话、语音问答、书籍知识库问答（RAG）。
+一个基于 `pnpm workspace` 的全栈 AI 项目，包含：
+- 通用 AI 对话（流式）
+- 语音问答（ASR + TTS）
+- 书籍知识库问答（TXT/EPUB）
+- Hybrid RAG（多 query 扩展 + ES/Milvus 混合召回 + Rerank + 生成）
 
-项目已升级为 AI SDK 协议化流式架构：
-- 后端通过 Data Stream Protocol 输出 `UIMessage` SSE
-- 前端使用 `@ai-sdk/react` 的 `useChat` 消费流
-- 消息按 `message.parts` 渲染文本与工具调用（`web_search`、`send_mail`）
-
-## 技术栈
-
-- 前端：`Next.js 15`、`React 19`、`TypeScript`
-- 后端：`NestJS 11`、`TypeORM`、`MySQL`
-- AI：`LangChain(createAgent)`、`@ai-sdk/langchain`、`ai`、`@ai-sdk/react`
-- RAG：`Milvus` 向量检索、`.epub/.txt` 分块向量化入库
-- 流式通信：`SSE`（Data Stream Protocol）+ `WebSocket`（TTS 音频中继）
-- 语音：腾讯云 `ASR/TTS`
-- 渲染：`streamdown`（Markdown/表格/Mermaid/代码块）
-
-## 项目特性
-
-1. 工程架构
-- `apps/web`（Next.js）+ `apps/api`（NestJS）分离部署
-- `pnpm workspace` 管理 Monorepo 与依赖
-
-2. 通用 AI 对话
-- 基于 `LangChain createAgent` + tools（`web_search`、`send_mail`、`time_now`）
-- 后端流式输出 Data Stream Protocol，前端 `useChat` 实时消费
-
-3. 工具调用可视化
-- 文本部分使用 `StreamdownText` 流式渲染
-- 工具调用按 `message.parts` 渲染为独立组件（检索面板、邮件面板）
-
-4. 语音全链路
-- 录音上传 `ASR` 转写
-- `WebSocket` 中继 `TTS` 音频，支持边生成边播与语音开关
-
-5. 书籍知识库问答（RAG）
-- 支持 `.epub/.txt` 上传
-- 服务端分块、向量化并写入 Milvus
-- 按 `bookId` 检索上下文并生成答案
-
-6. 本地会话记忆
-- `localStorage` 持久化 `sessionId` 与消息记录
-- 无登录即可恢复会话
-
-## 目录结构
+## 项目结构
 
 ```text
 .
 ├─ apps
-│  ├─ web                 # Next.js 前端
-│  │  └─ app
-│  │     ├─ home/components
-│  │     ├─ book
-│  │     └─ components    # StreamdownText / ToolPanels
-│  └─ api                 # NestJS 后端
-│     └─ src
-│        ├─ ai
-│        ├─ speech
-│        ├─ book
-│        └─ tool
+│  ├─ web               # Next.js 前端
+│  └─ api               # NestJS 后端
 ├─ packages
 ├─ package.json
 └─ pnpm-workspace.yaml
 ```
 
-## 快速开始
+## 技术栈
 
-### 1. 环境要求
+- 前端：Next.js 15、React 19、TypeScript
+- 后端：NestJS 11、TypeORM、MySQL
+- AI：AI SDK、LangChain、OpenAI Compatible API
+- 检索：Milvus、Elasticsearch、Kibana
+- 语音：腾讯云 ASR/TTS
+- 通信：SSE（UIMessage Data Stream）+ WebSocket（TTS 流）
 
-- `Node.js >= 18`
-- `pnpm >= 10`
-- 可用的 `MySQL` 与 `Milvus`
+## 核心能力
 
-### 2. 安装依赖
+1. 通用 AI 对话
+- 前端使用 `@ai-sdk/react` 的 `useChat`
+- 后端按 Data Stream Protocol 输出 `UIMessage`
+
+2. 书籍知识库问答
+- 上传 `.txt/.epub`
+- 自动切分、向量化并写入 Milvus
+- 元信息写入 MySQL
+- 文本分片写入 Elasticsearch（用于关键词召回）
+
+3. Hybrid RAG（复杂问题）
+- LLM 进行多 query 扩展（1-3 条）
+- ES 与 Milvus 并行召回
+- 合并去重后做 Rerank
+- 基于重排后的片段生成回答
+
+4. 语音链路
+- 录音上传 ASR
+- TTS 通过 WebSocket 推流到前端
+- 前端使用 `MediaSource + SourceBuffer` 边收边播
+
+## 本地启动
+
+### 1) 安装依赖
 
 ```bash
 pnpm install
 ```
 
-### 3. 配置环境变量
-
-在 `apps/api/.env` 中配置（示例）：
-
-```env
-# 基础
-PORT=3001
-
-# LLM / Embedding
-OPENAI_API_KEY=
-OPENAI_BASE_URL=
-MODEL_NAME=
-EMBEDDINGS_MODEL_NAME=
-EMBEDDINGS_DIM=1024
-
-# Milvus
-MILVUS_ADDRESS=localhost:19530
-
-# MySQL（当前代码默认在 app.module.ts 中写死了 localhost/root/admin/hello，可按需改为环境变量）
-
-# 腾讯云语音
-SECRET_ID=
-SECRET_KEY=
-APP_ID=
-TTS_VOICE_TYPE=101001
-
-# 搜索工具
-BOCHA_API_KEY=
-
-# 邮件工具
-MAIL_HOST=
-MAIL_PORT=
-MAIL_SECURE=false
-MAIL_USER=
-MAIL_PASS=
-MAIL_FROM=
-```
-
-前端可选环境变量 `apps/web/.env.local`：
-
-```env
-NEXT_PUBLIC_API_BASE_URL=http://localhost:3001
-NEXT_PUBLIC_API_WS_BASE_URL=ws://localhost:3001
-```
-
-### 4. 启动开发环境
+### 2) 启动基础服务（ES/MySQL/Milvus/Kibana）
 
 ```bash
-pnpm dev
+docker compose -f apps/api/docker-compose.yml up -d
 ```
 
-默认端口：
+### 3) 配置环境变量
+
+请参考并填写：
+- `apps/api/.env.local`
+- `apps/api/.env.deploy.example`
+
+重点变量：
+- LLM：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`MODEL_NAME`
+- Embedding：`EMBEDDINGS_MODEL_NAME`、`EMBEDDINGS_DIM`
+- DB：`DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASS`、`DB_NAME`
+- Milvus：`MILVUS_ADDRESS`、`MILVUS_TOKEN`（可选）
+- Hybrid：`ES_NODE`、`ES_INDEX`、`RERANK_API_KEY`、`RERANK_MODEL`、`RERANK_BASE_URL`
+- 语音：`SECRET_ID`、`SECRET_KEY`、`APP_ID`、`TTS_VOICE_TYPE`
+
+### 4) 启动应用
+
+```bash
+pnpm --filter api dev
+pnpm --filter web dev
+```
+
+默认地址：
 - Web: `http://localhost:3000`
-- API: `http://localhost:3001`
+- API: `http://localhost:4000`
+- ES: `http://localhost:9200`
+- Kibana: `http://localhost:5601`
 
-## 关键接口
-
-- 通用聊天（Data Stream Protocol）：`POST /ai/chat`
-- 书籍问答（Data Stream Protocol）：`POST /book/read`
-- 书籍问答（旧 SSE 文本流，保留）：`GET /book/read/stream`
-- 语音识别：`POST /speech/asr`
-- 语音合成中继：`WS /speech/tts/ws`
-- 书籍上传：`POST /book/save`
-- 书籍列表：`GET /book/list`
-
-## 脚本命令
-
-根目录：
+## 常用命令
 
 ```bash
 pnpm dev
 pnpm build
-pnpm start
-```
-
-子应用：
-
-```bash
-pnpm --filter web dev
-pnpm --filter web build
-pnpm --filter api dev
 pnpm --filter api build
+pnpm --filter web build
 ```
 
-## 当前实现说明
+## 主要接口
 
-- 前端主聊天页与书籍问答页均已接入 `useChat`
-- 消息渲染统一走 `UIMessage.parts`
-- 文本使用 Streamdown 流式渲染
-- `web_search` / `send_mail` 工具输出使用独立 UI 面板
+- 通用对话：`POST /ai/chat`
+- 书籍上传：`POST /book/save`
+- 书籍问答：`POST /book/read`
+- 语音识别：`POST /speech/asr`
+- 语音合成中继：`WS /speech/tts/ws`
 
-## License
+## 说明
 
-仅供学习与交流使用。
+- 这是一个工程化实践项目，重点是“链路完整可运行”。
 
-## 线上部署
 
-- 前端（Vercel）：https://next-nest-workspace.vercel.app
-- 后端 API（Railway）：`apps/api` 服务
-- MySQL（Railway）：Railway MySQL 服务
-- 向量数据库（Zilliz Cloud Milvus）：托管 Milvus 实例
-
-### 部署架构
-
-- Vercel 部署 `apps/web`
-- Railway 部署 `apps/api`，并承载 API + MySQL 运行环境
-- Zilliz 提供外部 Milvus 向量检索能力
-- `apps/web` 通过 `NEXT_PUBLIC_API_BASE_URL` 访问 Railway API
-- `apps/api` 连接 Railway MySQL 与 Zilliz Milvus
-
-### 部署流程
-
-1. 准备 GitHub 仓库
-- 将 Monorepo 代码推送到 GitHub（建议使用 `main` 分支）。
-
-2. 在 Vercel 部署前端
-- 在 Vercel 中导入该仓库。
-- Root Directory 设置为 `apps/web`。
-- Build Command 使用：`pnpm --filter web build`
-- 输出目录按 Next.js 默认配置即可。
-- 配置环境变量：
-  - `NEXT_PUBLIC_API_BASE_URL=https://<你的-railway-api-域名>`
-- 部署完成后，线上地址示例：
-  - `https://next-nest-workspace.vercel.app`
-
-3. 在 Railway 部署 API
-- 在 Railway 中基于同一 GitHub 仓库创建服务。
-- Root Directory 设置为 `apps/api`。
-- 启动命令可使用 `pnpm --filter api start`（或继续使用当前可工作的 Railway/Nixpacks 默认配置）。
-- 在 Railway 中配置 `apps/api/.env` 对应变量：
-  - `OPENAI_API_KEY`
-  - `OPENAI_BASE_URL`
-  - `MODEL_NAME`
-  - `EMBEDDINGS_MODEL_NAME`
-  - `EMBEDDINGS_DIM`
-  - `MILVUS_ADDRESS`
-  - `MILVUS_TOKEN`
-  - `DB_HOST`
-  - `DB_PORT`
-  - `DB_USER`
-  - `DB_PASS`
-  - `DB_NAME`
-  - `SECRET_ID`
-  - `SECRET_KEY`
-  - `APP_ID`
-  - `TTS_VOICE_TYPE`
-  - `BOCHA_API_KEY`
-  - `MAIL_HOST`
-  - `MAIL_PORT`
-  - `MAIL_SECURE`
-  - `MAIL_USER`
-  - `MAIL_PASS`
-  - `MAIL_FROM`
-
-4. 在 Railway 创建 MySQL
-- 在同一个 Railway Project 中添加 MySQL 服务/插件。
-- 将生成的连接信息写入 API 环境变量：
-  - `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASS`、`DB_NAME`
-
-5. 在 Zilliz Cloud 创建 Milvus
-- 创建 Zilliz Cloud 集群/数据库。
-- 将连接信息写入 Railway API 环境变量：
-  - `MILVUS_ADDRESS`
-  - `MILVUS_TOKEN`
-- 确保 `EMBEDDINGS_DIM` 与 Embedding 模型输出维度一致。
-
-6. 打通前后端
-- 在 Vercel 配置：
-  - `NEXT_PUBLIC_API_BASE_URL=https://<你的-railway-api-域名>`
-- 更新变量后重新部署 Vercel。
-
-7. 部署验证
-- 打开前端地址并验证以下接口：
-  - 通用聊天：`POST /ai/chat`
-  - 书籍上传：`POST /book/save`
-  - 书籍问答流式：`POST /book/read`
