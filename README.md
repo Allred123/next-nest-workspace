@@ -3,7 +3,7 @@
 一个基于 `pnpm workspace` 的全栈 AI 项目，包含：
 - 通用 AI 对话（流式）
 - 语音问答（ASR + TTS）
-- 书籍知识库问答（TXT/EPUB）
+- 书籍知识库问答（TXT/EPUB/PDF/DOCX）
 - Hybrid RAG（多 query 扩展 + ES/Milvus 混合召回 + Rerank + 生成）
 
 ## 项目结构

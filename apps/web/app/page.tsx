@@ -23,7 +23,7 @@ const featureList = [
   },
   {
     title: "书籍知识库问答",
-    desc: "支持 TXT/EPUB 上传、切分、向量化入库，并基于书籍内容进行检索增强回答。",
+    desc: "支持 TXT/EPUB/PDF/DOCX 上传、切分、向量化入库，并基于书籍内容进行检索增强回答。",
   },
   {
     title: "Hybrid RAG",
@@ -43,7 +43,9 @@ const stackList = [
 
 export default function HomePage() {
   return (
-    <main className={`${styles.page} ${spaceGrotesk.className} ${notoSansSc.className}`}>
+    <main
+      className={`${styles.page} ${spaceGrotesk.className} ${notoSansSc.className}`}
+    >
       <div className={styles.bgGlowOne} />
       <div className={styles.bgGlowTwo} />
 
@@ -51,7 +53,8 @@ export default function HomePage() {
         <p className={styles.kicker}>AI Full-Stack Workspace</p>
         <h1 className={styles.title}>AI 对话与书籍检索问答平台</h1>
         <p className={styles.subtitle}>
-          一个前后端分离的 Monorepo 项目，覆盖文本对话、语音交互、书籍知识库检索与混合召回问答。
+          一个前后端分离的 Monorepo
+          项目，覆盖文本对话、语音交互、书籍知识库检索与混合召回问答。
         </p>
         <div className={styles.actions}>
           <Link className={styles.primaryBtn} href="/home">
@@ -67,7 +70,8 @@ export default function HomePage() {
         <article className={styles.card}>
           <h2 className={styles.cardTitle}>项目定位</h2>
           <p className={styles.cardText}>
-            `apps/web` 提供交互式前端，`apps/api` 提供 AI、语音和知识库能力。项目重点是把“可用的 AI
+            `apps/web` 提供交互式前端，`apps/api` 提供
+            AI、语音和知识库能力。项目重点是把“可用的 AI
             功能链路”做成一体化工程，而不是单点 Demo。
           </p>
         </article>
@@ -98,4 +102,3 @@ export default function HomePage() {
     </main>
   );
 }
-

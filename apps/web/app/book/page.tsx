@@ -216,7 +216,7 @@ export default function BookPage() {
             <input
               className={styles.fileInput}
               type="file"
-              accept=".epub,application/epub+zip,.txt,text/plain"
+              accept=".epub,application/epub+zip,.txt,text/plain,.pdf,application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)}
               disabled={uploading}
             />
