@@ -19,6 +19,8 @@ import { Client as ElasticsearchClient } from "@elastic/elasticsearch";
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { EPubLoader } from "@langchain/community/document_loaders/fs/epub";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
+import mammoth from "mammoth";
+import { PDFParse } from "pdf-parse";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { z } from "zod";
 import {
@@ -269,11 +271,15 @@ export class BookService {
       throw new BadRequestException("bookName cannot be empty");
     }
     const fileExt = (extname(originalFileName) || "").toLowerCase();
-    const extAllowed = fileExt === ".epub" || fileExt === ".txt";
+    const extAllowed =
+      fileExt === ".epub" ||
+      fileExt === ".txt" ||
+      fileExt === ".pdf" ||
+      fileExt === ".docx";
     const mimeAllowed = ALLOWED_MIME_TYPES.includes(file.mimetype);
     if (!extAllowed && !mimeAllowed) {
       throw new BadRequestException(
-        "Unsupported file type. Please upload an .epub or .txt file.",
+        "Unsupported file type. Please upload .epub, .txt, .pdf, or .docx.",
       );
     }
 
@@ -424,14 +430,21 @@ export class BookService {
         generation: Annotation,
       });
 
+      const isBookFile =
+        book.originalFileName.toLowerCase().endsWith(".epub");
+      const docLabel = isBookFile ? "书籍" : "文档";
+      const evidenceHint = isBookFile
+        ? "需要当前文档中的具体情节/事实/证据，或多条件推理"
+        : "需要当前文档中的具体内容/事实/数据/证据，或多条件推理";
+
       const routeIntentNode = async (state: any) => {
         const router = this.chatModel.withStructuredOutput(routeSchema);
         const route = await router.invoke(
           [
             "你是 RAG 路由器。",
             "请判断用户问题是 simple 还是 complex。",
-            "- simple: 常识问答、定义解释、无需书内证据。",
-            "- complex: 需要《当前书籍》具体情节/事实/证据，或多条件推理。",
+            "- simple: 常识问答、定义解释、无需文档内证据。",
+            `- complex: ${evidenceHint}。`,
             "",
             `问题：${state.question}`,
           ].join("\n"),
@@ -536,6 +549,7 @@ export class BookService {
         const generation = await this.generateAnswerByDocs(
           state.question as string,
           (state.topDocuments ?? []) as RetrievedDoc[],
+          docLabel,
         );
         return { generation };
       };
@@ -624,11 +638,12 @@ export class BookService {
   private async generateAnswerByDocs(
     query: string,
     docs: RetrievedDoc[],
+    docLabel: string = "文档",
   ): Promise<string> {
     const context = formatHybridContext(docs);
     const response = await this.chatModel.invoke(
       [
-        "你是严谨的中文书籍问答助手。",
+        `你是严谨的中文${docLabel}问答助手。`,
         "优先依据检索片段作答，不要编造；若证据不足请明确说明不确定。",
         "",
         `用户问题：${query}`,
@@ -956,6 +971,26 @@ export class BookService {
       const text = fileBuffer.toString("utf8").trim();
       if (!text) {
         throw new BadRequestException("Uploaded text file is empty");
+      }
+      return [{ pageContent: text }];
+    }
+
+    if (fileExt === ".pdf") {
+      const parser = new PDFParse({ data: fileBuffer });
+      const parsed = await parser.getText();
+      await parser.destroy();
+      const text = (parsed.text ?? "").trim();
+      if (!text) {
+        throw new BadRequestException("Uploaded PDF file is empty");
+      }
+      return [{ pageContent: text }];
+    }
+
+    if (fileExt === ".docx") {
+      const parsed = await mammoth.extractRawText({ buffer: fileBuffer });
+      const text = (parsed.value ?? "").trim();
+      if (!text) {
+        throw new BadRequestException("Uploaded DOCX file is empty");
       }
       return [{ pageContent: text }];
     }

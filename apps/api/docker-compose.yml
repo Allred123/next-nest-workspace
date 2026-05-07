@@ -4,6 +4,7 @@
     build: ./elasticsearch # 从本地 Dockerfile 构建镜像（自带IK）
     ports:
       - "9200:9200" # ES 访问端口
+    hostname: es
     environment:
       - discovery.type=single-node # 单节点运行（开发环境）
       - xpack.security.enabled=false # 关闭安全认证，免密码访问

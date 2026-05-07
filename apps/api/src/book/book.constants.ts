@@ -18,7 +18,11 @@ export const MILVUS_INSERT_BATCH_SIZE = 20;
 export const MILVUS_INSERT_RPC_TIMEOUT_MS = 30_000;
 export const MILVUS_INSERT_RETRY_MAX = 3;
 export const MILVUS_INSERT_RETRY_BACKOFF_MS = 1_000;
-export const ALLOWED_MIME_TYPES = ["text/plain", "application/epub+zip"];
+export const ALLOWED_MIME_TYPES = [
+  "text/plain",
+  "application/epub+zip",
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+];
 export const BOOK_UPLOAD_DIR = join(process.cwd(), "storage", "books");
 export const LOCAL_TEMP_BOOK_DIR = join(tmpdir(), "new-ai-agent-books");
-
