@@ -66,17 +66,76 @@ docker compose -f apps/api/docker-compose.yml up -d
 
 ### 3) 配置环境变量
 
-请参考并填写：
-- `apps/api/.env.local`
-- `apps/api/.env.deploy.example`
+在以下两个位置创建 `.env.local` 文件：
 
-重点变量：
-- LLM：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`MODEL_NAME`
-- Embedding：`EMBEDDINGS_MODEL_NAME`、`EMBEDDINGS_DIM`
-- DB：`DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASS`、`DB_NAME`
-- Milvus：`MILVUS_ADDRESS`、`MILVUS_TOKEN`（可选）
-- Hybrid：`ES_NODE`、`ES_INDEX`、`RERANK_API_KEY`、`RERANK_MODEL`、`RERANK_BASE_URL`
-- 语音：`SECRET_ID`、`SECRET_KEY`、`APP_ID`、`TTS_VOICE_TYPE`
+#### `apps/api/.env.local`（后端）
+
+```bash
+# OpenAI API config
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+MODEL_NAME=qwen-plus
+
+EMBEDDINGS_MODEL_NAME=text-embedding-v3
+
+# 腾讯云语音 (ASR + TTS)
+SECRET_ID=your_tencent_secret_id
+SECRET_KEY=your_tencent_secret_key
+APP_ID=your_tencent_app_id
+TTS_VOICE_TYPE=502001
+
+# Hybrid retrieval (ES + Milvus + Rerank)
+ES_NODE=http://localhost:9200
+ES_INDEX=book                            # 可选，为空则使用当前书籍 collection 名
+RERANK_API_KEY=your_rerank_api_key
+RERANK_MODEL=qwen3-rerank
+RERANK_BASE_URL=https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank
+
+# MySQL
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USER=root
+DB_PASS=admin
+DB_NAME=book
+DB_SYNCHRONIZE=true
+DB_LOGGING=true
+
+# 文件存储 (local | s3)
+STORAGE_DRIVER=local
+
+# S3 配置（STORAGE_DRIVER=s3 时需要）
+S3_REGION=
+S3_BUCKET=
+S3_ENDPOINT=
+S3_ACCESS_KEY_ID=
+S3_SECRET_ACCESS_KEY=
+S3_FORCE_PATH_STYLE=false
+S3_KEY_PREFIX=books
+S3_PUBLIC_BASE_URL=
+
+# 联网搜索
+BOCHA_API_KEY=your_bocha_api_key
+
+# 邮件服务
+MAIL_HOST=smtp.qq.com
+MAIL_PORT=587
+MAIL_SECURE=false
+MAIL_USER=your_mail_user
+MAIL_PASS=your_mail_password
+MAIL_FROM="No Reply" <your_mail_user>
+
+# 服务端口（默认 4000）
+PORT=4000
+```
+
+#### `apps/web/.env.local`（前端）
+
+```bash
+NEXT_PUBLIC_API_BASE_URL=http://localhost:4000
+NEXT_PUBLIC_API_WS_BASE_URL=ws://localhost:4000
+```
+
+> 部署时参考 `apps/api/.env.deploy.example`，其中包含了 Milvus、CORS 等额外的部署环境变量。
 
 ### 4) 启动应用
 
