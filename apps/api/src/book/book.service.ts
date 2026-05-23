@@ -449,7 +449,7 @@ export class BookService {
             `问题：${state.question}`,
           ].join("\n"),
         );
-        console.log("用户提出的问题是simple 还是 complex？", route);
+        this.logger.log(`[route_intent] strategy=${route.strategy}, reason=${route.reason}`);
 
         return {
           strategy: route.strategy as RouteStrategy,
@@ -464,64 +464,99 @@ export class BookService {
       };
 
       const directAnswerNode = async (state: any) => {
-        const response = await this.chatModel.invoke(
-          [
-            "你是中文问答助手。",
-            "这是简单问题，直接回答即可；若不确定请明确说明。",
-            "",
-            `问题：${state.question}`,
-          ].join("\n"),
-        );
-        return { generation: extractModelText(response) };
+        this.logger.log(`[direct_answer] question=${state.question}`);
+        try {
+          const response = await this.chatModel.invoke(
+            [
+              "你是中文问答助手。",
+              "这是简单问题，直接回答即可；若不确定请明确说明。",
+              "",
+              `问题：${state.question}`,
+            ].join("\n"),
+          );
+          return { generation: extractModelText(response) };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.error(`[direct_answer] failed: ${message}`);
+          return { generation: "抱歉，回答生成失败，请稍后重试。" };
+        }
       };
 
       const queryAugmentNode = async (state: any) => {
-        const planner = this.chatModel.withStructuredOutput(queryAugmentSchema);
-        const result = await planner.invoke(
-          [
-            "你是检索问题重写器。",
-            "请基于用户问题生成 1-3 条不同角度、可直接用于检索的问句。",
-            "要求：每条都具体、避免重复、保留关键约束。",
-            "",
-            `原问题：${state.question}`,
-          ].join("\n"),
-        );
-        const queries = (result.queries ?? [])
-          .map((item) => item.trim())
-          .filter(Boolean)
-          .slice(0, 3);
-        return { queryAugmentation: { queries } };
+        this.logger.log(`[query_augment] start, question=${state.question}`);
+        try {
+          const planner = this.chatModel.withStructuredOutput(queryAugmentSchema);
+          const result = await planner.invoke(
+            [
+              "你是检索问题重写器。",
+              "请基于用户问题生成 1-3 条不同角度、可直接用于检索的问句。",
+              "要求：每条都具体、避免重复、保留关键约束。",
+              "",
+              `原问题：${state.question}`,
+            ].join("\n"),
+          );
+          const queries = (result.queries ?? [])
+            .map((item: string) => item.trim())
+            .filter(Boolean)
+            .slice(0, 3);
+          this.logger.log(`[query_augment] generated ${queries.length} queries: ${JSON.stringify(queries)}`);
+          if (!queries.length) {
+            this.logger.warn(`[query_augment] LLM returned empty queries, falling back to original question`);
+            return { queryAugmentation: { queries: [state.question as string] } };
+          }
+          return { queryAugmentation: { queries } };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.error(`[query_augment] failed: ${message}`);
+          return { queryAugmentation: { queries: [state.question as string] } };
+        }
       };
 
       const esRecallNode = async (state: any) => {
-        const queries = buildHybridRetrievalQueries(
-          state.question as string,
-          state.queryAugmentation as { queries?: string[] },
-        );
-        const esHits = this.esClient
-          ? await recallEsDocuments({
-              esClient: this.esClient,
-              indexName: this.getEsIndexName(book.milvusCollection),
-              queries,
-              totalK: HYBRID_ES_K,
-            })
-          : [];
-        return { esHits };
+        this.logger.log(`[es_recall] start`);
+        try {
+          const queries = buildHybridRetrievalQueries(
+            state.question as string,
+            state.queryAugmentation as { queries?: string[] },
+          );
+          const esHits = this.esClient
+            ? await recallEsDocuments({
+                esClient: this.esClient,
+                indexName: this.getEsIndexName(book.milvusCollection),
+                queries,
+                totalK: HYBRID_ES_K,
+              })
+            : [];
+          this.logger.log(`[es_recall] got ${esHits.length} hits`);
+          return { esHits };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.error(`[es_recall] failed: ${message}`);
+          return { esHits: [] };
+        }
       };
 
       const milvusRecallNode = async (state: any) => {
-        const queries = buildHybridRetrievalQueries(
-          state.question as string,
-          state.queryAugmentation as { queries?: string[] },
-        );
-        const milvusHits = await recallMilvusDocuments({
-          collectionName: book.milvusCollection,
-          queries,
-          totalK: HYBRID_MILVUS_K,
-          searchFn: (collection, q, limit) =>
-            this.searchBookCollection(collection, q, limit),
-        });
-        return { milvusHits };
+        this.logger.log(`[milvus_recall] start`);
+        try {
+          const queries = buildHybridRetrievalQueries(
+            state.question as string,
+            state.queryAugmentation as { queries?: string[] },
+          );
+          const milvusHits = await recallMilvusDocuments({
+            collectionName: book.milvusCollection,
+            queries,
+            totalK: HYBRID_MILVUS_K,
+            searchFn: (collection, q, limit) =>
+              this.searchBookCollection(collection, q, limit),
+          });
+          this.logger.log(`[milvus_recall] got ${milvusHits.length} hits`);
+          return { milvusHits };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.error(`[milvus_recall] failed: ${message}`);
+          return { milvusHits: [] };
+        }
       };
 
       const mergeNode = async (state: any) => {
@@ -529,10 +564,12 @@ export class BookService {
           (state.esHits ?? []) as RetrievedDoc[],
           (state.milvusHits ?? []) as RetrievedDoc[],
         );
+        this.logger.log(`[merge_recall] merged ${merged.length} docs from es=${(state.esHits ?? []).length}, milvus=${(state.milvusHits ?? []).length}`);
         return { merged };
       };
 
       const rerankNode = async (state: any) => {
+        this.logger.log(`[rerank] start, docs=${(state.merged ?? []).length}`);
         const topDocuments = await rerankHybridDocs({
           query: state.question as string,
           docs: (state.merged ?? []) as RetrievedDoc[],
@@ -542,16 +579,25 @@ export class BookService {
           rerankBaseUrl: this.rerankBaseUrl,
           onWarn: (message) => this.logger.warn(`[rerank fallback] ${message}`),
         });
+        this.logger.log(`[rerank] got ${topDocuments.length} top docs`);
         return { topDocuments };
       };
 
       const generateNode = async (state: any) => {
-        const generation = await this.generateAnswerByDocs(
-          state.question as string,
-          (state.topDocuments ?? []) as RetrievedDoc[],
-          docLabel,
-        );
-        return { generation };
+        this.logger.log(`[generate_answer] start, docs=${(state.topDocuments ?? []).length}`);
+        try {
+          const generation = await this.generateAnswerByDocs(
+            state.question as string,
+            (state.topDocuments ?? []) as RetrievedDoc[],
+            docLabel,
+          );
+          this.logger.log(`[generate_answer] done, length=${generation.length}`);
+          return { generation };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.error(`[generate_answer] failed: ${message}`);
+          return { generation: "抱歉，回答生成失败，请稍后重试。" };
+        }
       };
 
       const afterRoute = (state: any) =>
@@ -605,11 +651,13 @@ export class BookService {
         this.emitTtsEnd(sessionId);
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`[streamRead] error: ${message}`);
+      if (error instanceof Error && error.stack) {
+        this.logger.error(`[streamRead] stack: ${error.stack}`);
+      }
       if (sessionId) {
-        this.emitTtsError(
-          sessionId,
-          error instanceof Error ? error.message : String(error),
-        );
+        this.emitTtsError(sessionId, message);
       }
       throw error;
     }

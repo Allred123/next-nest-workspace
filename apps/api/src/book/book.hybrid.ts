@@ -27,9 +27,15 @@ export async function recallEsDocuments(input: {
   totalK: number;
 }): Promise<RetrievedDoc[]> {
   const { esClient, indexName, queries, totalK } = input;
+
+  const indexExists = await esClient.indices.exists({ index: indexName });
+  if (!indexExists) {
+    return [];
+  }
+
   const n = Math.max(1, queries.length);
   const kEach = Math.max(2, Math.ceil(totalK / n));
-  const batches = await Promise.all(
+  const settled = await Promise.allSettled(
     queries.map((q) =>
       esClient.search({
         index: indexName,
@@ -39,7 +45,6 @@ export async function recallEsDocuments(input: {
             query: q,
             fields: ["note_title^2", "note_body", "title", "content"],
             type: "best_fields",
-            analyzer: "ik_smart",
           },
         },
       }),
@@ -48,8 +53,10 @@ export async function recallEsDocuments(input: {
 
   const out: RetrievedDoc[] = [];
   for (let qi = 0; qi < queries.length; qi += 1) {
+    const result = settled[qi];
+    if (result.status === "rejected") continue;
     const q = queries[qi];
-    const hits = (batches[qi].hits?.hits ?? []) as Array<{
+    const hits = (result.value.hits?.hits ?? []) as Array<{
       _id?: string;
       _score?: number;
       _source?: Record<string, unknown>;
@@ -81,13 +88,15 @@ export async function recallMilvusDocuments(input: {
   const { collectionName, queries, totalK, searchFn } = input;
   const n = Math.max(1, queries.length);
   const kEach = Math.max(2, Math.ceil(totalK / n));
-  const batches = await Promise.all(
+  const settled = await Promise.allSettled(
     queries.map((q) => searchFn(collectionName, q, kEach)),
   );
   const out: RetrievedDoc[] = [];
   for (let qi = 0; qi < queries.length; qi += 1) {
+    const result = settled[qi];
+    if (result.status === "rejected") continue;
     const q = queries[qi];
-    for (const row of batches[qi] ?? []) {
+    for (const row of result.value ?? []) {
       const content = String(row.content ?? "").trim();
       if (!content) continue;
       out.push({

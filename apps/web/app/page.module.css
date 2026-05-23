@@ -198,8 +198,55 @@
   background: rgba(255, 255, 255, 0.72);
 }
 
+.dockerGrid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.dockerItem {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.65);
+}
+
+.dockerHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.dockerName {
+  font-size: 14px;
+}
+
+.dockerPort {
+  font-size: 13px;
+  color: var(--primary);
+}
+
+.dockerDesc {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 @media (max-width: 900px) {
   .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dockerGrid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 500px) {
+  .dockerGrid {
     grid-template-columns: 1fr;
   }
 }
